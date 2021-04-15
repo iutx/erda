@@ -143,3 +143,72 @@ func (e *Endpoints) AddonScale(ctx context.Context, r *http.Request, vars map[st
 
 	return httpserver.OkResp(nil)
 }
+
+// InitAddonMysql mysql(addon) init
+func (e *Endpoints) InitAddonMysql(ctx context.Context, r *http.Request, vars map[string]string) (
+	httpserver.Responser, error) {
+
+	var req []apistructs.OpsAddonMysqlInitRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return apierrors.ErrInitAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	if err := e.Addons.InitMysql(req); err != nil {
+		return apierrors.ErrInitAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	return httpserver.OkResp(nil)
+}
+
+// CheckAddonMysql check mysql(addon) status of master and slave
+func (e *Endpoints) CheckAddonMysql(ctx context.Context, r *http.Request, vars map[string]string) (
+	httpserver.Responser, error) {
+
+	var req apistructs.OpsAddonMysqlCheckRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return apierrors.ErrCheckAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	res, err := e.Addons.CheckMysql(req)
+	if err != nil {
+		return apierrors.ErrCheckAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	return httpserver.OkResp(res)
+}
+
+// ExecAddonMysql exec sql scrip
+func (e *Endpoints) ExecAddonMysql(ctx context.Context, r *http.Request, vars map[string]string) (
+	httpserver.Responser, error) {
+
+	var req apistructs.OpsAddonMysqlExecRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return apierrors.ErrExecAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	if err := e.Addons.ExecMysql(req); err != nil {
+		return apierrors.ErrExecAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	return httpserver.OkResp(nil)
+}
+
+// ExecFileAddonMysql exec sql file
+func (e *Endpoints) ExecFileAddonMysql(ctx context.Context, r *http.Request, vars map[string]string) (
+	httpserver.Responser, error) {
+
+	var req apistructs.OpsAddonMysqlExecFileRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return apierrors.ErrExecFileAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	if err := e.Addons.ExecFileMysql(req); err != nil {
+		return apierrors.ErrExecFileAddonMysql.InternalError(err).ToResp(), nil
+	}
+
+	return httpserver.OkResp(nil)
+}

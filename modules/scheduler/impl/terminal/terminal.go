@@ -15,8 +15,9 @@ package terminal
 
 import (
 	"encoding/json"
+	"fmt"
+	"github.com/erda-project/erda/pkg/discover"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -77,7 +78,7 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 	}
 	if containerinfo.Name != "docker" {
 		// Not a container console, as a soldier as a proxy
-		SoldierTerminal(r, message, conn)
+		OpsTerminal(message, conn)
 		return
 	}
 	var args ContainerInfoArg
@@ -156,36 +157,25 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 	clustername := instance.Cluster
 	if !ok1 || !ok2 || !ok3 {
 		// If there is no corresponding namespace, name, containername in the meta, it is considered to be the dcos path, and the original soldier is taken
-		SoldierTerminal(r, message, conn)
+		OpsTerminal(message, conn)
 		return
 	}
 
 	K8STerminal(clustername, k8snamespace, k8spodname, k8scontainername, conn)
 }
 
-// SoldierTerminal proxy of soldier
-func SoldierTerminal(r *http.Request, initmessage []byte, upperConn *websocket.Conn) {
-	soldierAddr, err := url.Parse(r.URL.Query().Get("url"))
-	if err != nil {
-		logrus.Errorf("failed to url parse: %v, err: %v", r.URL.Query().Get("url"), err)
-	}
-	soldierAddr.Path = r.URL.Path
-	switch soldierAddr.Scheme {
-	case "https":
-		soldierAddr.Scheme = "wss"
-	case "http":
-		soldierAddr.Scheme = "ws"
-	default:
-		soldierAddr.Scheme = "ws"
-	}
+// OpsTerminal proxy of ops terminal
+func OpsTerminal(initMessage []byte, upperConn *websocket.Conn) {
+	var wsAddress = fmt.Sprintf("ws://%s/api/nodes/terminal", discover.Ops())
 
-	conn, _, err := websocket.DefaultDialer.Dial(soldierAddr.String(), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(wsAddress, nil)
 	if err != nil {
-		logrus.Errorf("failed to dial with %s: %v", soldierAddr, err)
+		logrus.Errorf("failed to dial with %s: %v", wsAddress, err)
 		return
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, initmessage); err != nil {
-		logrus.Errorf("failed to write message: %v, err: %v", string(initmessage), err)
+
+	if err := conn.WriteMessage(websocket.TextMessage, initMessage); err != nil {
+		logrus.Errorf("failed to write message: %v, err: %v", string(initMessage), err)
 		return
 	}
 	var wait sync.WaitGroup

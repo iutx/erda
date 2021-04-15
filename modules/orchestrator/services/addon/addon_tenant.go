@@ -137,7 +137,7 @@ func (a *Addon) CreateMysqlTenant(name string, addoninsRouting *dbclient.AddonIn
 	execSqlDto.User = rootname.(string)
 	execSqlDto.Password = rootpasswd.(string)
 	execSqlDto.Sqls = sqls
-	if err := a.bdl.MySQLExec(&execSqlDto, formatSoldierUrl(&clusterinfo)); err != nil {
+	if err := a.bdl.MySQLExec(&execSqlDto, formatOpsURL(&clusterinfo)); err != nil {
 		return "", err
 	}
 

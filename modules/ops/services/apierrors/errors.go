@@ -22,10 +22,14 @@ var (
 )
 
 var (
-	ErrGetAddonConfig    = err("ErrGetAddonConfig", "failed to get addon configuration")
-	ErrGetAddonStatus    = err("ErrGetAddonStatus", "failed to  get addon status")
-	ErrUpdateAddonConfig = err("ErrUpdateAddonConfig", "failed to update addon configuration")
-	ErrCreateCluster     = err("ErrCreateCluster", "failed to create cluster")
+	ErrGetAddonConfig     = err("ErrGetAddonConfig", "failed to get addon configuration")
+	ErrGetAddonStatus     = err("ErrGetAddonStatus", "failed to  get addon status")
+	ErrUpdateAddonConfig  = err("ErrUpdateAddonConfig", "failed to update addon configuration")
+	ErrInitAddonMysql     = err("ErrInitAddonMysql", "failed to init mysql addon")
+	ErrCheckAddonMysql    = err("ErrCheckAddonMysql", "failed to check master and slave status of mysql addon")
+	ErrExecAddonMysql     = err("ErrExecAddonMysql", "failed to exec sqls")
+	ErrExecFileAddonMysql = err("ErrExecAddonMysql", "failed to exec sql file")
+	ErrCreateCluster      = err("ErrCreateCluster", "failed to create cluster")
 )
 
 var (

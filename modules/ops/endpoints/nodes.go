@@ -166,6 +166,11 @@ func (e *Endpoints) RmNodes(ctx context.Context, r *http.Request, vars map[strin
 	})
 }
 
+func (e *Endpoints) TerminalNode(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	e.nodes.Terminal(w, r)
+	return nil
+}
+
 func mkResponse(content interface{}) (httpserver.Responser, error) {
 	return httpserver.HTTPResponse{
 		Status:  http.StatusOK,

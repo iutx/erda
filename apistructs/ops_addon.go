@@ -98,3 +98,29 @@ type OpsAddonStatusQueryRequest struct {
 type OpsAddonStatusData struct {
 	Status StatusCode `json:"status"`
 }
+
+type OpsAddonMysqlBaseRequest struct {
+	User     string `json:"user"`
+	Password string `json:"password"`
+	URL      string `json:"url"`
+}
+
+type OpsAddonMysqlInitRequest struct {
+	OpsAddonMysqlBaseRequest
+	SQLs []string `json:"sqls"`
+}
+
+type OpsAddonMysqlCheckRequest struct {
+	OpsAddonMysqlBaseRequest
+}
+
+type OpsAddonMysqlExecRequest struct {
+	OpsAddonMysqlBaseRequest
+	SQLs []string `json:"sqls"`
+}
+
+type OpsAddonMysqlExecFileRequest struct {
+	OpsAddonMysqlBaseRequest
+	OssURL    string   `json:"ossUrl"`
+	CreateDbs []string `json:"createDbs"`
+}

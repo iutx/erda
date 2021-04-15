@@ -186,14 +186,14 @@ func (a *Addon) initMsAfterStart(serviceGroup *apistructs.ServiceGroup, masterNa
 	}
 
 	// 请求init 接口
-	err := a.bdl.MySQLInit(&mysqlExecList, formatSoldierUrl(clusterInfo))
+	err := a.bdl.MySQLInit(&mysqlExecList, formatOpsURL(clusterInfo))
 	return err
 }
 
-// formatSoldierUrl 拼接soldier地址
-func formatSoldierUrl(clusterInfo *apistructs.ClusterInfoData) string {
+// formatOpsURL format ops url
+func formatOpsURL(clusterInfo *apistructs.ClusterInfoData) string {
 	if (*clusterInfo)[apistructs.DICE_IS_EDGE] == "false" {
-		return "http://" + discover.Soldier()
+		return "http://" + discover.Ops()
 	}
 	port := "80"
 	protocol := "https"
@@ -203,8 +203,7 @@ func formatSoldierUrl(clusterInfo *apistructs.ClusterInfoData) string {
 		protocol = "http"
 		port = (*clusterInfo)[apistructs.DICE_HTTP_PORT]
 	}
-	return protocol + "://soldier." + (*clusterInfo)[apistructs.DICE_ROOT_DOMAIN] + ":" + port
-
+	return protocol + "://ops." + (*clusterInfo)[apistructs.DICE_ROOT_DOMAIN] + ":" + port
 }
 
 // checkMysqlHa 判断mysql主从同步状态
@@ -227,7 +226,7 @@ func (a *Addon) checkMysqlHa(serviceGroup *apistructs.ServiceGroup, masterName, 
 	}
 
 	// 请求init 接口
-	err := a.bdl.MySQLCheck(&mysqlExec, formatSoldierUrl(clusterInfo))
+	err := a.bdl.MySQLCheck(&mysqlExec, formatOpsURL(clusterInfo))
 	return err
 }
 
@@ -294,7 +293,7 @@ func (a *Addon) createDBs(serviceGroup *apistructs.ServiceGroup, existsMysqlExec
 	execSqlDto.Sqls = sqls
 
 	// 请求create_dbs接口 接口
-	err := a.bdl.MySQLExec(&execSqlDto, formatSoldierUrl(clusterInfo))
+	err := a.bdl.MySQLExec(&execSqlDto, formatOpsURL(clusterInfo))
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +356,7 @@ func (a *Addon) initSqlFile(serviceGroup *apistructs.ServiceGroup, existsMysqlEx
 	execSqlDto.OssURL = initSql
 
 	// 请求create_dbs接口 接口
-	err := a.bdl.MySQLExecFile(&execSqlDto, formatSoldierUrl(clusterInfo))
+	err := a.bdl.MySQLExecFile(&execSqlDto, formatOpsURL(clusterInfo))
 	return err
 }
 

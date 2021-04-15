@@ -42,5 +42,5 @@ func TestClusterInfoData_DiceProtocolIsHTTPS(t *testing.T) {
 }
 
 func TestClusterInfoData_MustGetPublicURL(t *testing.T) {
-	assert.Equal(t, "https://soldier.dev.terminus.io:443", clusterInfo.MustGetPublicURL("soldier"))
+	assert.Equal(t, "https://ops.dev.terminus.io:443", clusterInfo.MustGetPublicURL("ops"))
 }

@@ -92,6 +92,7 @@ func (e *Endpoints) Routes() []httpserver.Endpoint {
 		{Path: "/api/node-labels", Method: http.MethodPost, Handler: auth(i18nPrinter(e.UpdateLabels))},
 		{Path: "/api/nodes", Method: http.MethodPost, Handler: auth(i18nPrinter(e.AddNodes))},
 		{Path: "/api/nodes", Method: http.MethodDelete, Handler: auth(i18nPrinter(e.RmNodes))},
+		{Path: "/api/nodes/terminal", Method: http.MethodGet, WriterHandler: e.TerminalNode},
 		{Path: "/api/records", Method: http.MethodGet, Handler: auth(i18nPrinter(e.Query))},
 		{Path: "/api/recordtypes", Method: http.MethodGet, Handler: auth(i18nPrinter(e.RecordTypeList))},
 		{Path: "/api/node-logs", Method: http.MethodGet, Handler: auth(i18nPrinter(e.Logs))},
@@ -197,6 +198,12 @@ func (e *Endpoints) Routes() []httpserver.Endpoint {
 		{Path: "/api/addons/actions/config", Method: http.MethodPost, Handler: auth(i18nPrinter(e.UpdateAddonConfig))},
 		{Path: "/api/addons/actions/scale", Method: http.MethodPost, Handler: auth(i18nPrinter(e.AddonScale))},
 		{Path: "/api/addons/status", Method: http.MethodGet, Handler: auth(i18nPrinter(e.GetAddonStatus))},
+
+		// addon mysql
+		{Path: "/api/addon-mysql/init", Method: http.MethodPost, Handler: auth(i18nPrinter(e.InitAddonMysql))},
+		{Path: "/api/addon-mysql/check", Method: http.MethodPost, Handler: auth(i18nPrinter(e.CheckAddonMysql))},
+		{Path: "/api/addon-mysql/exec", Method: http.MethodPost, Handler: auth(i18nPrinter(e.ExecAddonMysql))},
+		{Path: "/api/addon-mysql/exec_file", Method: http.MethodPost, Handler: auth(i18nPrinter(e.ExecFileAddonMysql))},
 
 		{Path: "/api/aliyun-client", Method: http.MethodPost, WriterHandler: e.DoRemoteAction},
 

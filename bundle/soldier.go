@@ -51,11 +51,11 @@ func (b *Bundle) RunSoldierScript(scriptName string, params map[string]string) e
 	return nil
 }
 
-// MySQLInit 主从初始化
-func (b *Bundle) MySQLInit(mysqlExecList *[]apistructs.MysqlExec, soldierUrl string) error {
+// MySQLInit Init master and slave
+func (b *Bundle) MySQLInit(mysqlExecList *[]apistructs.MysqlExec, opsURL string) error {
 	hc := b.hc
 	logrus.Infof("MySQLInit body:%+v", *mysqlExecList)
-	resp, err := hc.Post(soldierUrl).Path(apistructs.AddonMysqlInitURL).
+	resp, err := hc.Post(opsURL).Path(apistructs.AddonMysqlInitURL).
 		Header("Content-Type", "application/json").
 		Header("Accept", "application/json").
 		JSONBody(mysqlExecList).
@@ -65,17 +65,17 @@ func (b *Bundle) MySQLInit(mysqlExecList *[]apistructs.MysqlExec, soldierUrl str
 	}
 	logrus.Infof("MySQLInit response :%+v", resp.StatusCode())
 	if !resp.IsOK() {
-		return errors.New("mysql初始化报错。")
+		return errors.New("mysql init error")
 	}
 	return nil
 }
 
-// MySQLCheck 主从初始化
-func (b *Bundle) MySQLCheck(mysqlExec *apistructs.MysqlExec, soldierUrl string) error {
+// MySQLCheck check master and slave status
+func (b *Bundle) MySQLCheck(mysqlExec *apistructs.MysqlExec, opsURL string) error {
 	hc := b.hc
 	logrus.Infof("MySQLCheck body:%+v", *mysqlExec)
 	var checkResp apistructs.GetMysqlCheckResponse
-	resp, err := hc.Post(soldierUrl).Path(apistructs.AddonMysqlcheckStatusURL).
+	resp, err := hc.Post(opsURL).Path(apistructs.AddonMysqlcheckStatusURL).
 		Header("Content-Type", "application/json").
 		Header("Accept", "application/json").
 		JSONBody(mysqlExec).
@@ -83,7 +83,7 @@ func (b *Bundle) MySQLCheck(mysqlExec *apistructs.MysqlExec, soldierUrl string) 
 	if err != nil {
 		return apierrors.ErrInvoke.InternalError(err)
 	}
-	logrus.Infof("MySQLCheck response :%+v", *resp)
+	logrus.Infof("MySQLCheck response :%v", string(resp.Body()))
 	if !resp.IsOK() {
 		return errors.New("mysql主从状态同步检测报错。")
 	}
@@ -100,13 +100,13 @@ func (b *Bundle) MySQLCheck(mysqlExec *apistructs.MysqlExec, soldierUrl string) 
 	return nil
 }
 
-// MySQLExec 初始化mysql数据库
-func (b *Bundle) MySQLExec(mysqlExec *apistructs.MysqlExec, soldierUrl string) error {
+// MySQLExec init mysql database
+func (b *Bundle) MySQLExec(mysqlExec *apistructs.MysqlExec, opsURL string) error {
 	hc := b.hc
 	logrus.Infof("MySQLExec body: %+v", *mysqlExec)
 
-	logrus.Infof("MySQLExec url: %s", soldierUrl)
-	resp, err := hc.Post(soldierUrl).Path(apistructs.AddonMysqlExecURL).
+	logrus.Infof("MySQLExec url: %s", opsURL)
+	resp, err := hc.Post(opsURL).Path(apistructs.AddonMysqlExecURL).
 		Header("Content-Type", "application/json").
 		Header("Accept", "application/json").
 		JSONBody(mysqlExec).
@@ -122,12 +122,12 @@ func (b *Bundle) MySQLExec(mysqlExec *apistructs.MysqlExec, soldierUrl string) e
 	return nil
 }
 
-// MySQLExecFile 初始化mysql init.sql
-func (b *Bundle) MySQLExecFile(mysqlExec *apistructs.MysqlExec, soldierUrl string) error {
+// MySQLExecFile init mysql
+func (b *Bundle) MySQLExecFile(mysqlExec *apistructs.MysqlExec, opsURL string) error {
 	hc := b.hc
 	logrus.Infof("executing init.sql, request body: %+v", *mysqlExec)
-	logrus.Infof("executing init.sql url: %s", soldierUrl)
-	resp, err := hc.Post(soldierUrl).Path(apistructs.AddonMysqlExecFileURL).
+	logrus.Infof("executing init.sql url: %s", opsURL)
+	resp, err := hc.Post(opsURL).Path(apistructs.AddonMysqlExecFileURL).
 		Header("Content-Type", "application/json").
 		Header("Accept", "application/json").
 		JSONBody(mysqlExec).

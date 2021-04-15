@@ -25,7 +25,6 @@ import (
 	"github.com/erda-project/erda/modules/soldier/conf"
 	"github.com/erda-project/erda/modules/soldier/mysql"
 	"github.com/erda-project/erda/modules/soldier/proxy"
-	"github.com/erda-project/erda/modules/soldier/registry"
 	"github.com/erda-project/erda/modules/soldier/settings"
 )
 
@@ -43,11 +42,6 @@ func Initialize() error {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Healthy"))
 	})
-
-	registryRouter := router.PathPrefix("/registry").Subrouter()
-	registryRouter.Methods("POST").PathPrefix("/remove/manifests").HandlerFunc(registry.RemoveManifests)
-	//registryRouter.Methods("POST").PathPrefix("/remove/layers").HandlerFunc(registry.RemoveLayers)
-	registryRouter.Methods("GET").PathPrefix("/readonly").HandlerFunc(registry.Readonly)
 
 	autoopRouter := router.PathPrefix("/autoop").Subrouter()
 	autoopRouter.Methods("POST").PathPrefix("/run/{name}").HandlerFunc(autoop.RunAction)

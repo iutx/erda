@@ -1,17 +1,4 @@
-// Copyright (c) 2021 Terminus, Inc.
-//
-// This program is free software: you can use, redistribute, and/or modify
-// it under the terms of the GNU Affero General Public License, version 3
-// or later ("AGPL"), as published by the Free Software Foundation.
-//
-// This program is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <http://www.gnu.org/licenses/>.
-
-package command
+package nodes
 
 import (
 	"context"
@@ -31,11 +18,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/kr/pty"
 	"github.com/sirupsen/logrus"
-
-	"github.com/erda-project/erda/modules/soldier/settings"
 )
 
-const username = "root"
+const username = "erda"
 
 var (
 	uid, gid uint32
@@ -97,17 +82,25 @@ func isPort(i int) bool {
 	return i >= 1 && i <= 65535
 }
 
-const BufferSize = 1024
+// From setting
+const (
+	ForwardPort = 0
+)
+
+var (
+	ExitChan <-chan struct{}
+)
 
 const (
-	Error   = '1'
-	Ping    = '2'
-	Pong    = '3'
-	Input   = '4'
-	Output  = '5'
-	GetSize = '6'
-	Size    = '7'
-	SetSize = '8'
+	BufferSize = 1024
+	Error      = '1'
+	Ping       = '2'
+	Pong       = '3'
+	Input      = '4'
+	Output     = '5'
+	GetSize    = '6'
+	Size       = '7'
+	SetSize    = '8'
 )
 
 var upgrader = websocket.Upgrader{
@@ -142,7 +135,7 @@ func (a Action) TerminalContext(ctx context.Context) (cmd *exec.Cmd, err error) 
 	if err == nil {
 		cmd = exec.CommandContext(ctx, a.Name, b...)
 		cmd.Env = a.Env
-		if settings.ForwardPort >= 0 {
+		if ForwardPort >= 0 {
 			setUser(cmd)
 		}
 		setEnv(cmd)
@@ -176,7 +169,7 @@ func (a Action) Docker() ([]string, error) {
 		return nil, errors.New("container required")
 	}
 	args := make([]string, 0, 6)
-	if settings.ForwardPort >= 0 {
+	if ForwardPort >= 0 {
 		args = append(args, "-H", fmt.Sprintf("tcp://%s:%d", v.Host, v.Port))
 	}
 	args = append(args, "exec", "-it", v.Container,
@@ -216,14 +209,14 @@ func (a Action) SSH() ([]string, error) {
 	}, nil
 }
 
-var dialer = websocket.Dialer{ //
+var dialer = websocket.Dialer{
 	ReadBufferSize:   BufferSize,
 	WriteBufferSize:  BufferSize,
 	HandshakeTimeout: 10 * time.Second,
 	Subprotocols:     []string{"soldier"},
 }
 
-func Terminal(w http.ResponseWriter, r *http.Request) {
+func (n *Nodes) Terminal(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		logrus.Debugln(err)
@@ -252,7 +245,7 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 			logrus.Debugln(err)
 			return
 		}
-		if settings.ForwardPort > 0 && a.Name == "docker" { //
+		if ForwardPort > 0 && a.Name == "docker" { //
 			if a.Args == nil {
 				logrus.Debugln("args required")
 				return
@@ -267,7 +260,7 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 				logrus.Debugln("host required")
 				return
 			}
-			u := fmt.Sprintf("ws://%s:%d/api/terminal", v.Host, settings.ForwardPort)
+			u := fmt.Sprintf("ws://%s:%d/api/terminal", v.Host, ForwardPort)
 			c, _, err := dialer.Dial(u, nil)
 			if err != nil {
 				logrus.Errorln(err)
@@ -441,7 +434,6 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan struct{})
 	go func() {
 		defer close(ch)
-		fmt.Println("waiting------->")
 		err := cmd.Wait()
 		if err != nil {
 			logrus.Debugf("cmd wait error: %v", err)
@@ -453,7 +445,7 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ch:
 			return
-		case <-settings.ExitChan:
+		case <-ExitChan:
 			return
 		case <-t:
 			if err := write([]byte{Ping}); err != nil {

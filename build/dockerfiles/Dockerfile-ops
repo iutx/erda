@@ -16,7 +16,9 @@ RUN make build APP_NAME=${APP_NAME} MODULE_PATH=${MODULE_PATH} DOCKER_IMAGE=${DO
 ARG BASE_DOCKER_IMAGE
 FROM ${BASE_DOCKER_IMAGE}
 
-RUN apk add --no-cache jq
+RUN apk add --no-cache jq \
+    && apk add openssh-client \
+    && adduser -D erda
 
 WORKDIR /app
 
