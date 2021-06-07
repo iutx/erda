@@ -25,11 +25,11 @@ func TestParseNetportalURL(t *testing.T) {
 		testURL2 = "inet://127.0.0.2?ssl=on&direct=on/master.mesos/service/marathon?test=on"
 	)
 
-	netportal, err := parseNetportalURL(testURL1)
+	netportal, err := parseNetPortalURL(testURL1)
 	assert.Nil(t, err)
 	assert.Equal(t, "inet://127.0.0.1", netportal)
 
-	netportal, err = parseNetportalURL(testURL2)
+	netportal, err = parseNetPortalURL(testURL2)
 	assert.Nil(t, err)
 	assert.Equal(t, "inet://127.0.0.2?ssl=on&direct=on", netportal)
 }

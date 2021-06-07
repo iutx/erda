@@ -89,6 +89,7 @@ func clusterRegister(server *remotedialer.Server, rw http.ResponseWriter, req *h
 			return
 		}
 		// TODO: register cluster info
+		logrus.Debugf("cluster info: %+v", clusterInfo)
 	}
 	server.ServeHTTP(rw, req)
 }

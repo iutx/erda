@@ -15,8 +15,15 @@ package k8s
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/erda-project/erda/apistructs"
+	"github.com/erda-project/erda/pkg/clusterdialer"
+	"io/ioutil"
+	"net/http"
 	"net/url"
 	"regexp"
 	"sync"
@@ -59,39 +66,97 @@ func hidePassEnv(b []byte) []byte {
 	})
 }
 
-func (k *Kubernetes) Terminal(namespace, podname, containername string, upperConn *websocket.Conn) {
+func (k *Kubernetes) Terminal(namespace, podName, containerName string, upperConn *websocket.Conn) {
 	f := func(cols, rows uint16) (*websocket.Conn, error) {
-		path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/exec", namespace, podname)
+		path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/exec", namespace, podName)
 		s := `stty cols %d rows %d; s=/bin/sh; if [ -f /bin/bash ]; then s=/bin/bash; fi; `
 		if conf.TerminalSecurity() {
 			s += "if [ `id -un` != dice ]; then su -l dice -s $s; exit $?; fi; "
 		}
 		s += "$s"
 		cmd := url.QueryEscape(fmt.Sprintf(s, cols, rows))
-		query := "command=sh&command=-c&command=" + cmd + "&container=" + containername + "&stdin=1&stdout=1&tty=true"
-		req, err := customhttp.NewRequest("GET", k.addr, nil)
-		if err != nil {
-			logrus.Errorf("failed to customhttp.NewRequest: %v", err)
-			return nil, err
-		}
+		query := "command=sh&command=-c&command=" + cmd + "&container=" + containerName + "&stdin=1&stdout=1&tty=true"
+
+		header := http.Header{}
+		dialer := websocket.DefaultDialer
+		dialer.TLSClientConfig = &tls.Config{}
 
 		execURL := url.URL{
-			Scheme:   "ws",
-			Host:     req.URL.Host,
+			Scheme:   "wss",
+			Host:     k.manageConfig.Address,
 			Path:     path,
 			RawQuery: query,
 		}
-		req.Header.Add("X-Portal-Websocket", "on")
-		if req.Header.Get("X-Portal-Host") != "" {
-			req.Header.Add("Host", req.Header.Get("X-Portal-Host"))
+
+		if !(k.manageConfig.Type == apistructs.ManageInet || k.manageConfig.Type == "") {
+			dialer.TLSClientConfig.InsecureSkipVerify = k.manageConfig.Insecure
+			if !k.manageConfig.Insecure {
+				caBytes, err := base64.StdEncoding.DecodeString(k.manageConfig.CaData)
+				if err != nil {
+					logrus.Errorf("ca bytes load error: %v", err)
+					return nil, err
+				}
+				pool := x509.NewCertPool()
+				pool.AppendCertsFromPEM(caBytes)
+				dialer.TLSClientConfig.RootCAs = pool
+			}
 		}
-		conn, _, err := websocket.DefaultDialer.Dial(execURL.String(), req.Header)
+
+		switch k.manageConfig.Type {
+		case apistructs.ManageProxy:
+			dialer.NetDialContext = clusterdialer.DialContext(k.clusterName)
+			header.Add("Authorization", "Bearer "+k.manageConfig.Token)
+		case apistructs.ManageToken:
+			header.Add("Authorization", "Bearer "+k.manageConfig.Token)
+		case apistructs.ManageCert:
+			certData, err := base64.StdEncoding.DecodeString(k.manageConfig.CertData)
+			if err != nil {
+				logrus.Errorf("decode cert data error: %v", err)
+				return nil, err
+			}
+			keyData, err := base64.StdEncoding.DecodeString(k.manageConfig.KeyData)
+			if err != nil {
+				logrus.Errorf("decode key data error: %v", err)
+				return nil, err
+			}
+			pair, err := tls.X509KeyPair(certData, keyData)
+			if err != nil {
+				logrus.Errorf("load X509Key pair error: %v", err)
+				return nil, err
+			}
+			dialer.TLSClientConfig.Certificates = []tls.Certificate{pair}
+		case apistructs.ManageInet:
+			fallthrough
+		default:
+			req, err := customhttp.NewRequest("GET", k.manageConfig.Address, nil)
+			if err != nil {
+				logrus.Errorf("failed to customhttp.NewRequest: %v", err)
+				return nil, err
+			}
+			req.Header.Add("X-Portal-Websocket", "on")
+			if req.Header.Get("X-Portal-Host") != "" {
+				req.Header.Add("Host", req.Header.Get("X-Portal-Host"))
+			}
+
+			execURL.Scheme = "ws"
+			execURL.Host = req.URL.Host
+			header = req.Header
+		}
+
+		conn, resp, err := dialer.Dial(execURL.String(), header)
 		if err != nil {
 			logrus.Errorf("failed to connect to %s: %v", execURL.String(), err)
+			if resp == nil {
+				return nil, err
+			}
+			logrus.Debugf("connect to %s request info: %+v", execURL.String(), resp.Request)
+			respBody, _ := ioutil.ReadAll(resp.Body)
+			logrus.Debugf("connect to %s response body: %s", execURL.String(), string(respBody))
 			return nil, err
 		}
 		return conn, nil
 	}
+
 	var conn *websocket.Conn
 	var waitConn sync.WaitGroup
 	waitConn.Add(1)

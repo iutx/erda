@@ -14,86 +14,93 @@
 package resourceinfo
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strconv"
 
 	"github.com/sirupsen/logrus"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/apistructs"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/node"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/pod"
-	"github.com/erda-project/erda/pkg/httpclient"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
 type ResourceInfo struct {
-	podutil  *pod.Pod
-	nodeutil *node.Node
-	addr     string
-	client   *httpclient.HTTPClient
+	client *kubernetes.Clientset
 }
 
-func New(addr string, client *httpclient.HTTPClient) *ResourceInfo {
-	podutil := pod.New(pod.WithCompleteParams(addr, client))
-	nodeutil := node.New(addr, client)
-	return &ResourceInfo{addr: addr, client: client, podutil: podutil, nodeutil: nodeutil}
+func New(client *kubernetes.Clientset) *ResourceInfo {
+	return &ResourceInfo{client: client}
 }
 
 // PARAM brief: Does not provide cpuusage, memusage data, reducing the overhead of calling k8sapi
 func (ri *ResourceInfo) Get(brief bool) (apistructs.ClusterResourceInfoData, error) {
-	podlist := &v1.PodList{Items: nil}
+	podList := &corev1.PodList{}
+
 	if !brief {
 		var err error
-		podlist, err = ri.podutil.ListAllNamespace([]string{"status.phase!=Succeeded", "status.phase!=Failed"})
+		podList, err = ri.client.CoreV1().Pods(metav1.NamespaceAll).List(context.Background(), metav1.ListOptions{
+			FieldSelector: "status.phase!=Succeeded,status.phase!=Failed",
+		})
 		if err != nil {
 			return apistructs.ClusterResourceInfoData{}, nil
 		}
 	}
-	nodelist, err := ri.nodeutil.List()
+
+	nodeList, err := ri.client.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		logrus.Errorf("failed to list nodes: %v", err)
 		return apistructs.ClusterResourceInfoData{}, nil
 	}
-	podmap := splitPodsByNodeName(podlist)
+
+	podMap := splitPodsByNodeName(podList)
 	nodeResourceInfoMap := map[string]*apistructs.NodeResourceInfo{}
-	for _, node := range nodelist.Items {
+
+	for _, no := range nodeList.Items {
 		var ip net.IP
-		for _, addr := range node.Status.Addresses {
-			if addr.Type == v1.NodeInternalIP {
+		for _, addr := range no.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP {
 				ip = net.ParseIP(addr.Address)
 			}
 		}
+
+		// ignore, if internalIP not found
 		if ip == nil {
-			// ignore, if internalIP not found
 			continue
 		}
+
 		nodeResourceInfoMap[ip.String()] = &apistructs.NodeResourceInfo{}
 		info := nodeResourceInfoMap[ip.String()]
-		info.Labels = nodeLabels(&node)
-		info.Ready = nodeReady(&node)
-		cpuAllocatable, err := strconv.ParseFloat(fmt.Sprintf("%f", node.Status.Allocatable.Cpu().AsDec()), 64)
+		info.Labels = nodeLabels(&no)
+		info.Ready = nodeReady(&no)
+		cpuAllocatable, err := strconv.ParseFloat(fmt.Sprintf("%f", no.Status.Allocatable.Cpu().AsDec()), 64)
 		if err != nil {
 			return apistructs.ClusterResourceInfoData{}, err
 		}
-		memAllocatable, _ := node.Status.Allocatable.Memory().AsInt64()
+
+		memAllocatable, _ := no.Status.Allocatable.Memory().AsInt64()
 		info.CPUAllocatable = cpuAllocatable
 		info.MemAllocatable = memAllocatable
-		pods := podmap[node.Name]
-		podlist := &v1.PodList{Items: pods}
-		reqs, limits := getPodsTotalRequestsAndLimits(podlist)
-		cpuReqs, cpuLimit, memReqs, memLimit := reqs[v1.ResourceCPU], limits[v1.ResourceCPU], reqs[v1.ResourceMemory], limits[v1.ResourceMemory]
+		pods := podMap[no.Name]
+
+		podList := &corev1.PodList{Items: pods}
+		reqs, limits := getPodsTotalRequestsAndLimits(podList)
+		cpuReqs, cpuLimit, memReqs, memLimit := reqs[corev1.ResourceCPU], limits[corev1.ResourceCPU], reqs[corev1.ResourceMemory], limits[corev1.ResourceMemory]
 		cpuReqsNum, err := strconv.ParseFloat(fmt.Sprintf("%f", cpuReqs.AsDec()), 64)
 		if err != nil {
 			return apistructs.ClusterResourceInfoData{}, err
 		}
+
 		memReqsNum, _ := memReqs.AsInt64()
 		cpuLimitNum, err := strconv.ParseFloat(fmt.Sprintf("%f", cpuLimit.AsDec()), 64)
 		if err != nil {
 			return apistructs.ClusterResourceInfoData{}, err
 		}
+
 		memLimitNum, _ := memLimit.AsInt64()
 		info.CPUReqsUsage = cpuReqsNum
 		info.CPULimitUsage = cpuLimitNum
@@ -104,19 +111,19 @@ func (ri *ResourceInfo) Get(brief bool) (apistructs.ClusterResourceInfoData, err
 	return apistructs.ClusterResourceInfoData{Nodes: nodeResourceInfoMap}, nil
 }
 
-func splitPodsByNodeName(podlist *v1.PodList) map[string][]v1.Pod {
-	podmap := map[string][]v1.Pod{}
+func splitPodsByNodeName(podlist *corev1.PodList) map[string][]corev1.Pod {
+	podmap := map[string][]corev1.Pod{}
 	for i := range podlist.Items {
 		if _, ok := podmap[podlist.Items[i].Spec.NodeName]; ok {
 			podmap[podlist.Items[i].Spec.NodeName] = append(podmap[podlist.Items[i].Spec.NodeName], podlist.Items[i])
 		} else {
-			podmap[podlist.Items[i].Spec.NodeName] = []v1.Pod{podlist.Items[i]}
+			podmap[podlist.Items[i].Spec.NodeName] = []corev1.Pod{podlist.Items[i]}
 		}
 	}
 	return podmap
 }
 
-func nodeLabels(n *v1.Node) []string {
+func nodeLabels(n *corev1.Node) []string {
 	r := []string{}
 	for k := range n.ObjectMeta.Labels {
 		if strutil.HasPrefixes(k, "dice/") {
@@ -126,9 +133,9 @@ func nodeLabels(n *v1.Node) []string {
 	return r
 }
 
-func nodeReady(n *v1.Node) bool {
+func nodeReady(n *corev1.Node) bool {
 	for _, cond := range n.Status.Conditions {
-		if cond.Type == v1.NodeReady {
+		if cond.Type == corev1.NodeReady {
 			if cond.Status == "True" {
 				return true
 			}
@@ -138,8 +145,8 @@ func nodeReady(n *v1.Node) bool {
 }
 
 // copy from kubectl
-func getPodsTotalRequestsAndLimits(podList *v1.PodList) (reqs map[v1.ResourceName]resource.Quantity, limits map[v1.ResourceName]resource.Quantity) {
-	reqs, limits = map[v1.ResourceName]resource.Quantity{}, map[v1.ResourceName]resource.Quantity{}
+func getPodsTotalRequestsAndLimits(podList *corev1.PodList) (reqs map[corev1.ResourceName]resource.Quantity, limits map[corev1.ResourceName]resource.Quantity) {
+	reqs, limits = map[corev1.ResourceName]resource.Quantity{}, map[corev1.ResourceName]resource.Quantity{}
 	for _, pod := range podList.Items {
 		podReqs, podLimits := PodRequestsAndLimits(&pod)
 		for podReqName, podReqValue := range podReqs {
@@ -165,8 +172,8 @@ func getPodsTotalRequestsAndLimits(podList *v1.PodList) (reqs map[v1.ResourceNam
 // copy from kubectl
 // PodRequestsAndLimits returns a dictionary of all defined resources summed up for all
 // containers of the pod.
-func PodRequestsAndLimits(pod *v1.Pod) (reqs, limits v1.ResourceList) {
-	reqs, limits = v1.ResourceList{}, v1.ResourceList{}
+func PodRequestsAndLimits(pod *corev1.Pod) (reqs, limits corev1.ResourceList) {
+	reqs, limits = corev1.ResourceList{}, corev1.ResourceList{}
 	for _, container := range pod.Spec.Containers {
 		addResourceList(reqs, container.Resources.Requests)
 		addResourceList(limits, container.Resources.Limits)
@@ -181,7 +188,7 @@ func PodRequestsAndLimits(pod *v1.Pod) (reqs, limits v1.ResourceList) {
 
 // copy from kubectl
 // addResourceList adds the resources in newList to list
-func addResourceList(list, new v1.ResourceList) {
+func addResourceList(list, new corev1.ResourceList) {
 	for name, quantity := range new {
 		if value, ok := list[name]; !ok {
 			list[name] = quantity.DeepCopy()
@@ -195,7 +202,7 @@ func addResourceList(list, new v1.ResourceList) {
 // copy from kubectl
 // maxResourceList sets list to the greater of list/newList for every resource
 // either list
-func maxResourceList(list, new v1.ResourceList) {
+func maxResourceList(list, new corev1.ResourceList) {
 	for name, quantity := range new {
 		if value, ok := list[name]; !ok {
 			list[name] = quantity.DeepCopy()

@@ -498,11 +498,6 @@ func (h *HTTPEndpoints) ClusterHook(ctx context.Context, r *http.Request, vars m
 	return httpserver.HTTPResponse{Status: http.StatusOK}, nil
 }
 
-func (h *HTTPEndpoints) ClusterCreate(ctx context.Context, r *http.Request, vars map[string]string) (
-	httpserver.Responser, error) {
-	return httpserver.HTTPResponse{Status: http.StatusGone}, nil
-}
-
 func (h *HTTPEndpoints) JobCreate(ctx context.Context, r *http.Request, vars map[string]string) (
 	httpserver.Responser, error) {
 	//h.metric.TotalCounter.WithLabelValues(metric.JobCreateTotal).Add(1)

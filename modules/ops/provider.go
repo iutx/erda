@@ -20,14 +20,17 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/erda-project/erda-infra/base/servicehub"
+	manager "github.com/erda-project/erda/providers/cluster-manager"
 )
 
-type provider struct{}
+type provider struct {
+	Manager manager.Interface
+}
 
 // Run Run the provider
 func (p *provider) Run(ctx context.Context) error {
 	logrus.Info("ops provider is running...")
-	return initialize()
+	return initialize(p.Manager)
 }
 
 func init() {

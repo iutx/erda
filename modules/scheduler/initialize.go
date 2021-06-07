@@ -38,7 +38,7 @@ func Initialize() error {
 	// open the function of dump stack
 	dumpstack.Open()
 	logrus.Infof("start the service and listen on address: \"%s\"", conf.ListenAddr())
-	logrus.Errorf("[alert] starting scheduler instance")
+	logrus.Info("[alert] starting scheduler instance")
 	i18n.InitI18N()
 
 	return server.NewServer(conf.ListenAddr()).ListenAndServe()

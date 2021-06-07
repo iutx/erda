@@ -50,7 +50,7 @@ var upgrader = websocket.Upgrader{
 		return false
 	},
 }
-var instanceinfoClient = instanceinfo.New(dbengine.MustOpen())
+var instanceInfoClient = instanceinfo.New(dbengine.MustOpen())
 
 type ContainerInfo struct {
 	Env  []string        `json:"env"`
@@ -98,7 +98,7 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Query the containerid in the instance list
-	instances, err := instanceinfoClient.InstanceReader().ByContainerID(args.Container).Do()
+	instances, err := instanceInfoClient.InstanceReader().ByContainerID(args.Container).Do()
 	if err != nil {
 		logrus.Errorf("failed to get instance by containerid: %v", err)
 		return
@@ -175,7 +175,7 @@ func Terminal(w http.ResponseWriter, r *http.Request) {
 }
 
 // SoldierTerminal proxy of soldier
-func SoldierTerminal(r *http.Request, initmessage []byte, upperConn *websocket.Conn) {
+func SoldierTerminal(r *http.Request, initMessage []byte, upperConn *websocket.Conn) {
 	soldierAddr, err := url.Parse(r.URL.Query().Get("url"))
 	if err != nil {
 		logrus.Errorf("failed to url parse: %v, err: %v", r.URL.Query().Get("url"), err)
@@ -195,8 +195,8 @@ func SoldierTerminal(r *http.Request, initmessage []byte, upperConn *websocket.C
 		logrus.Errorf("failed to dial with %s: %v", soldierAddr, err)
 		return
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, initmessage); err != nil {
-		logrus.Errorf("failed to write message: %v, err: %v", string(initmessage), err)
+	if err := conn.WriteMessage(websocket.TextMessage, initMessage); err != nil {
+		logrus.Errorf("failed to write message: %v, err: %v", string(initMessage), err)
 		return
 	}
 	var wait sync.WaitGroup
@@ -236,17 +236,19 @@ func SoldierTerminal(r *http.Request, initmessage []byte, upperConn *websocket.C
 	wait.Wait()
 }
 
-func K8STerminal(clustername, namespace, podname, containername string, upperConn *websocket.Conn) {
-	executorname := clusterutil.GenerateExecutorByClusterName(clustername)
-	executor, err := executor.GetManager().Get(executortypes.Name(executorname))
+func K8STerminal(clusterName, namespace, podName, containerName string, upperConn *websocket.Conn) {
+	executorName := clusterutil.GenerateExecutorByClusterName(clusterName)
+	e, err := executor.GetManager().Get(executortypes.Name(executorName))
 	if err != nil {
-		logrus.Errorf("failed to get executor by executorname(%s)", executorname)
+		logrus.Errorf("failed to get executor by executorname(%s)", executorName)
 		return
 	}
-	terminalExecutor, ok := executor.(executortypes.TerminalExecutor)
+
+	terminalExecutor, ok := e.(executortypes.TerminalExecutor)
 	if !ok {
-		logrus.Errorf("executor(%s) not impl executortypes.TerminalExecutor", executorname)
+		logrus.Errorf("executor(%s) not impl executortypes.TerminalExecutor", executorName)
 		return
 	}
-	terminalExecutor.Terminal(namespace, podname, containername, upperConn)
+
+	terminalExecutor.Terminal(namespace, podName, containerName, upperConn)
 }

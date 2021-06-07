@@ -26,7 +26,7 @@ import (
 )
 
 func init() {
-	executortypes.Register("DEMO", func(name executortypes.Name, clustername string, options map[string]string, optionsPlus interface{}) (executortypes.Executor, error) {
+	executortypes.Register("DEMO", func(name executortypes.Name, clusterName string, options map[string]string, optionsPlus interface{}) (executortypes.Executor, error) {
 		return &Demo{
 			name: name,
 		}, nil

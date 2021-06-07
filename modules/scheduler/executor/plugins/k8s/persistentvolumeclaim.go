@@ -14,11 +14,18 @@
 package k8s
 
 import (
+	"context"
 	apiv1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func (k *Kubernetes) newPVC(pvc *apiv1.PersistentVolumeClaim) error {
-	return k.pvc.Create(pvc)
+	_, err := k.k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(context.Background(), pvc, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // todo: deletePVC

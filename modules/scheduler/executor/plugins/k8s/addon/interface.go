@@ -14,7 +14,6 @@
 package addon
 
 import (
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/erda-project/erda/apistructs"
@@ -41,44 +40,6 @@ type K8SUtil interface {
 	GetK8SAddr() string
 }
 
-type DeploymentUtil interface {
-	Create(*appsv1.Deployment) error
-	Get(namespace, name string) (*appsv1.Deployment, error)
-	List(namespace string, labelSelector map[string]string) (appsv1.DeploymentList, error)
-	Delete(namespace, name string) error
-}
-
-type StatefulsetUtil interface {
-	Create(*appsv1.StatefulSet) error
-	Delete(namespace, name string) error
-	Get(namespace, name string) (*appsv1.StatefulSet, error)
-	List(namespace string) (appsv1.StatefulSetList, error)
-}
-
-type DaemonsetUtil interface {
-	Create(*appsv1.DaemonSet) error
-	Update(*appsv1.DaemonSet) error
-	Delete(namespace, name string) error
-	Get(namespace, name string) (*appsv1.DaemonSet, error)
-	List(namespace string, labelSelector map[string]string) (appsv1.DaemonSetList, error)
-}
-
-type ServiceUtil interface {
-	List(namespace string) (corev1.ServiceList, error)
-}
-
-type NamespaceUtil interface {
-	Exists(ns string) error
-	Create(ns string, labels map[string]string) error
-	Delete(ns string) error
-}
-
-type SecretUtil interface {
-	Get(ns, name string) (*corev1.Secret, error)
-	Create(*corev1.Secret) error
-	CreateIfNotExist(secret *corev1.Secret) error
-}
-
 type ImageSecretUtil interface {
 	//The secret used to pull the mirror under the default namespace is copied to the current ns,
 	// Then add this secret to the default sa of this ns
@@ -89,9 +50,6 @@ type HealthcheckUtil interface {
 	NewHealthcheckProbe(*apistructs.Service) *corev1.Probe
 }
 
-type PVCUtil interface {
-	Create(pvc *corev1.PersistentVolumeClaim) error
-}
 type OvercommitUtil interface {
 	CPUOvercommit(limit float64) float64
 	MemoryOvercommit(limit int) int

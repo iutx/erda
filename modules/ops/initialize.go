@@ -16,6 +16,7 @@ package ops
 
 import (
 	"context"
+	manager "github.com/erda-project/erda/providers/cluster-manager"
 	"os"
 	"time"
 
@@ -37,7 +38,7 @@ import (
 	"github.com/erda-project/erda/pkg/jsonstore"
 )
 
-func initialize() error {
+func initialize(manager manager.Interface) error {
 	conf.Load()
 
 	// set log formatter
@@ -58,7 +59,7 @@ func initialize() error {
 	dumpstack.Open()
 	logrus.Infoln(version.String())
 
-	server, err := do()
+	server, err := do(manager)
 	if err != nil {
 		return nil
 	}
@@ -66,7 +67,7 @@ func initialize() error {
 	return server.ListenAndServe()
 }
 
-func do() (*httpserver.Server, error) {
+func do(manager manager.Interface) (*httpserver.Server, error) {
 	db := dbclient.Open(dbengine.MustOpen())
 
 	i18n.InitI18N()
@@ -96,7 +97,7 @@ func do() (*httpserver.Server, error) {
 	}
 	bdl := bundle.New(bundleOpts...)
 
-	ep, err := initEndpoints(db, js, cachedJs, bdl)
+	ep, err := initEndpoints(db, manager, js, cachedJs, bdl)
 	if err != nil {
 		return nil, err
 	}
@@ -120,11 +121,12 @@ func do() (*httpserver.Server, error) {
 	return server, nil
 }
 
-func initEndpoints(db *dbclient.DBClient, js, cachedJS jsonstore.JsonStore, bdl *bundle.Bundle) (*endpoints.Endpoints, error) {
+func initEndpoints(db *dbclient.DBClient, manager manager.Interface, js, cachedJS jsonstore.JsonStore, bdl *bundle.Bundle) (*endpoints.Endpoints, error) {
 
 	// compose endpoints
 	ep := endpoints.New(
 		db,
+		manager,
 		js,
 		cachedJS,
 		endpoints.WithBundle(bdl),

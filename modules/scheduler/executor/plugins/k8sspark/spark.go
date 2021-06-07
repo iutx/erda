@@ -18,22 +18,19 @@ import (
 	"fmt"
 	"strings"
 
-	sparkv1beta2 "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/scheduler/executor/executortypes"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/clusterinfo"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/namespace"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/persistentvolumeclaim"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/role"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/rolebinding"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/secret"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/serviceaccount"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8sspark/sparkapplication"
 	"github.com/erda-project/erda/modules/scheduler/executor/util"
+	sparkv1beta2 "github.com/erda-project/erda/pkg/clientgo/apis/sparkoperator/v1beta2"
+	"github.com/erda-project/erda/pkg/clientgo/customclient"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
 	"github.com/erda-project/erda/pkg/httpclient"
 	"github.com/erda-project/erda/pkg/strutil"
 )
@@ -49,6 +46,7 @@ const (
 	sparkRoleBindingName     = "spark-role-binding"
 	imagePullPolicyAlways    = "Always"
 	prefetechVolumeName      = "pre-fetech-volume"
+	sparkAppLabelKey         = "sparkoperator.k8s.io/app-name"
 	defaultExecutorInstances = int32(1)
 )
 
@@ -65,6 +63,20 @@ const (
 func init() {
 	executortypes.Register(executorKind, func(name executortypes.Name, clusterName string, options map[string]string, optionsPlus interface{}) (
 		executortypes.Executor, error) {
+
+		k8sClient, err := util.GetClientSet(clusterName, options)
+		if err != nil {
+			return nil, err
+		}
+
+		// TODELETE
+		np, err := k8sClient.CustomClient.SparkoperatorV1beta2().SparkApplications(metav1.NamespaceAll).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			logrus.Error("[spark]client-go connect test------>", err.Error())
+			return nil, err
+		}
+		fmt.Println("[spark]client-go connect test------>", len(np.Items), clusterName)
+
 		addr, ok := options["ADDR"]
 		if !ok {
 			return nil, errors.Errorf("not found spark address in env variables")
@@ -101,7 +113,8 @@ func init() {
 			return nil, errors.Errorf("not found spark version in env variables")
 		}
 
-		clusterInfo, err := clusterinfo.New(clusterName, clusterinfo.WithCompleteParams(addr, client))
+		// TODELETE
+		clusterInfo, err := clusterinfo.New(clusterName, clusterinfo.WithKubernetesClient(k8sClient.K8sClient))
 		if err != nil {
 			return nil, errors.Errorf("failed to new cluster info, executorName: %s, clusterName: %s, (%v)",
 				name, clusterName, err)
@@ -116,32 +129,22 @@ func init() {
 			options:      options,
 			enableTag:    enableTag,
 			sparkVersion: sparkVersion,
-			client:       sparkapplication.New(sparkapplication.WithCompleteParams(addr, client)),
-			pvc:          persistentvolumeclaim.New(persistentvolumeclaim.WithCompleteParams(addr, client)),
-			namespace:    namespace.New(namespace.WithCompleteParams(addr, client)),
-			secret:       secret.New(secret.WithCompleteParams(addr, client)),
-			sa:           serviceaccount.New(serviceaccount.WithCompleteParams(addr, client)),
-			role:         role.New(role.WithCompleteParams(addr, client)),
-			rolebinding:  rolebinding.New(rolebinding.WithCompleteParams(addr, client)),
+			k8sClient:    k8sClient.K8sClient,
+			customClient: k8sClient.CustomClient,
 			clusterInfo:  clusterInfo,
 		}, nil
 	})
 }
 
 type k8sSpark struct {
+	k8sClient    *kubernetes.Clientset
 	name         executortypes.Name
 	clusterName  string
 	addr         string
 	options      map[string]string
 	enableTag    bool   // Whether to enable label scheduling
 	sparkVersion string // Spark deployment version
-	client       *sparkapplication.SparkApplication
-	pvc          *persistentvolumeclaim.PersistentVolumeClaim
-	namespace    *namespace.Namespace
-	secret       *secret.Secret
-	sa           *serviceaccount.ServiceAccount
-	role         *role.Role
-	rolebinding  *rolebinding.RoleBinding
+	customClient *customclient.Clientset
 	clusterInfo  *clusterinfo.ClusterInfo
 }
 
@@ -164,7 +167,7 @@ func (s *k8sSpark) Create(ctx context.Context, specObj interface{}) (interface{}
 
 	logrus.Debugf("start to create k8s spark job, body: %+v", job)
 
-	if err := s.prepareNamespaceResouce(job.Namespace); err != nil {
+	if err := s.prepareNamespaceResource(job.Namespace); err != nil {
 		return nil, err
 	}
 
@@ -178,7 +181,8 @@ func (s *k8sSpark) Create(ctx context.Context, specObj interface{}) (interface{}
 			job.Namespace, job.Name, err)
 	}
 
-	if err := s.client.Create(app); err != nil {
+	_, err = s.customClient.SparkoperatorV1beta2().SparkApplications(app.Namespace).Create(context.Background(), app, metav1.CreateOptions{})
+	if err != nil {
 		return nil, err
 	}
 
@@ -201,12 +205,13 @@ func (s *k8sSpark) Status(ctx context.Context, specObj interface{}) (apistructs.
 		return status, errors.New("invalid job spec")
 	}
 
-	app, err := s.client.Get(job.Namespace, job.Name)
+	app, err := s.customClient.SparkoperatorV1beta2().SparkApplications(job.Namespace).Get(context.Background(),
+		job.Name, metav1.GetOptions{})
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to get the status of k8s spark job, name: %s, (%v)", job.Name, err)
 		logrus.Warningf(errMsg)
 
-		if err == k8serror.ErrNotFound {
+		if k8serrors.IsNotFound(err) {
 			status.Status = apistructs.StatusNotFoundInCluster
 			return status, nil
 		}
@@ -249,7 +254,8 @@ func (s *k8sSpark) Remove(ctx context.Context, specObj interface{}) error {
 		return s.removePipelineJobs(job.Namespace)
 	}
 
-	if err := s.client.DeleteIfExists(job.Namespace, job.Name); err != nil {
+	err := s.customClient.SparkoperatorV1beta2().SparkApplications(job.Namespace).Delete(context.Background(), job.Name, metav1.DeleteOptions{})
+	if err != nil && !k8serrors.IsNotFound(err) {
 		return errors.Errorf("failed to remove spark application, namespace: %s, name: %s, (%v)",
 			job.Namespace, job.Name, err)
 	}
@@ -270,7 +276,15 @@ func (s *k8sSpark) Update(ctx context.Context, specObj interface{}) (interface{}
 			job.Namespace, job.Name, err)
 	}
 
-	if err := s.client.Update(app); err != nil {
+	curApp, err := s.customClient.SparkoperatorV1beta2().SparkApplications(job.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	app.ResourceVersion = curApp.ResourceVersion
+
+	_, err = s.customClient.SparkoperatorV1beta2().SparkApplications(app.Namespace).Update(context.Background(), app, metav1.UpdateOptions{})
+	if err != nil {
 		return nil, err
 	}
 
@@ -285,7 +299,7 @@ func (s *k8sSpark) Inspect(ctx context.Context, specObj interface{}) (interface{
 		return nil, errors.New("invalid job spec")
 	}
 
-	app, err := s.client.Get(job.Namespace, job.Name)
+	app, err := s.customClient.SparkoperatorV1beta2().SparkApplications(job.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +314,9 @@ func (s *k8sSpark) Cancel(ctx context.Context, specObj interface{}) (interface{}
 		return nil, errors.New("invalid job spec")
 	}
 
-	if err := s.client.DeletePod(job.Namespace, job.Name); err != nil {
+	if err := s.k8sClient.CoreV1().Pods(job.Namespace).DeleteCollection(context.Background(), metav1.DeleteOptions{}, metav1.ListOptions{
+		LabelSelector: labels.Set(map[string]string{sparkAppLabelKey: job.Name}).String(),
+	}); err != nil {
 		return nil, errors.Errorf("failed to cancel spark application, namespace: %s, name: %s, (%v)",
 			job.Namespace, job.Name, err)
 	}
@@ -325,8 +341,9 @@ func (s *k8sSpark) ResourceInfo(brief bool) (apistructs.ClusterResourceInfoData,
 }
 
 func (s *k8sSpark) removePipelineJobs(ns string) error {
-	return s.namespace.Delete(ns)
+	return s.k8sClient.CoreV1().Namespaces().Delete(context.TODO(), ns, metav1.DeleteOptions{})
 }
+
 func (*k8sSpark) CleanUpBeforeDelete() {}
 func (*k8sSpark) JobVolumeCreate(ctx context.Context, spec interface{}) (string, error) {
 	return "", fmt.Errorf("not support for k8sspark")

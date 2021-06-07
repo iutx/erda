@@ -14,9 +14,48 @@
 package k8s
 
 import (
+	"context"
+	"encoding/json"
+	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+func (k *Kubernetes) updateDefaultServiceAccountForImageSecret(namespace, secretName string) error {
+	// Try to create first, then update after failure
+	// k8s will automatically create the default serviceaccount, but there will be a delay, resulting in failure to update the probability.
+	newSa := newServiceAccount(defaultServiceAccountName, namespace, []string{secretName})
+
+	_, err := k.k8sClient.CoreV1().ServiceAccounts(namespace).Create(context.Background(), newSa, metav1.CreateOptions{})
+	if err != nil {
+		for {
+			sa, err := k.k8sClient.CoreV1().ServiceAccounts(namespace).Get(context.Background(), defaultServiceAccountName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+
+			sa.ImagePullSecrets = append(sa.ImagePullSecrets, corev1.LocalObjectReference{
+				Name: secretName,
+			})
+
+			patchData, err := json.Marshal(sa)
+			if err != nil {
+				return errors.Errorf("failed to Patch serviceaccount, name: %s, (%v)", sa.Name, err)
+			}
+
+			_, err = k.k8sClient.CoreV1().ServiceAccounts(sa.Namespace).Patch(context.Background(), sa.Name,
+				types.StrategicMergePatchType, patchData, metav1.PatchOptions{})
+
+			if !k8serrors.IsConflict(err) {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
 
 func newServiceAccount(name, namespace string, imageSecrets []string) *corev1.ServiceAccount {
 	sa := &corev1.ServiceAccount{
@@ -37,32 +76,4 @@ func newServiceAccount(name, namespace string, imageSecrets []string) *corev1.Se
 	}
 
 	return sa
-}
-
-func (k *Kubernetes) updateDefaultServiceAccountForImageSecret(namespace, secretName string) error {
-	var err error
-
-	// Try to create first, then update after failure
-	// k8s will automatically create the default serviceaccount, but there will be a delay, resulting in failure to update the probability.
-	if err = k.sa.Create(newServiceAccount(defaultServiceAccountName, namespace, []string{secretName})); err != nil {
-		for {
-			serviceaccount, err := k.sa.Get(namespace, defaultServiceAccountName)
-			if err != nil {
-				return err
-			}
-
-			serviceaccount.ImagePullSecrets = append(serviceaccount.ImagePullSecrets, corev1.LocalObjectReference{
-				Name: secretName,
-			})
-			err = k.sa.Patch(serviceaccount)
-			if err == nil {
-				break
-			}
-			if err.Error() != "Conflict" {
-				return err
-			}
-		}
-	}
-
-	return nil
 }

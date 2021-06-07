@@ -18,10 +18,16 @@ import (
 
 	flinkoperatorv1beta1 "github.com/erda-project/erda/pkg/clientgo/clientset/versioned/typed/flinkoperator/v1beta1"
 	openyurtv1alpha1 "github.com/erda-project/erda/pkg/clientgo/clientset/versioned/typed/openyurt/v1alpha1"
+	redisfailover "github.com/erda-project/erda/pkg/clientgo/clientset/versioned/typed/redisfailover/v1"
+	sparkoperatorv1beta1 "github.com/erda-project/erda/pkg/clientgo/clientset/versioned/typed/sparkoperator/v1beta1"
+	sparkoperatorv1beta2 "github.com/erda-project/erda/pkg/clientgo/clientset/versioned/typed/sparkoperator/v1beta2"
 )
 
 type Interface interface {
 	Discovery() discovery.DiscoveryInterface
 	FlinkoperatorV1beta1() flinkoperatorv1beta1.FlinkoperatorV1beta1Interface
+	SparkoperatorV1beta1() sparkoperatorv1beta1.SparkoperatorV1beta1Interface
+	SparkoperatorV1beta2() sparkoperatorv1beta2.SparkoperatorV1beta2Interface
 	OpenYurtV1Alpha1() openyurtv1alpha1.AppsV1alpha1Interface
+	RedisFailoverV1() redisfailover.RedisFailoverInterface
 }

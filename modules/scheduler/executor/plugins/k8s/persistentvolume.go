@@ -14,9 +14,11 @@
 package k8s
 
 import (
+	"context"
 	"strings"
 
 	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/pkg/strutil"
@@ -43,7 +45,7 @@ func (k *Kubernetes) DeletePV(sg *apistructs.ServiceGroup) error {
 			}
 
 			// todo: Confirm that the PV is bound to the corresponding PVC of the service under the runtime
-			list, err := k.pv.List(pvName)
+			list, err := k.k8sClient.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{})
 			if err != nil {
 				logrus.Errorf("failed to list pv, runtime: %s, pv: %s, (%v)", sg.ID, pvName, err)
 				continue
@@ -53,7 +55,7 @@ func (k *Kubernetes) DeletePV(sg *apistructs.ServiceGroup) error {
 					continue
 				}
 				logrus.Infof("succeed to got pvName: %s, phase: %v", list.Items[i].Name, list.Items[i].Status.Phase)
-				if err := k.pv.Delete(list.Items[i].Name); err != nil {
+				if err := k.k8sClient.CoreV1().PersistentVolumes().Delete(context.Background(), list.Items[i].Name, metav1.DeleteOptions{}); err != nil {
 					logrus.Errorf("failed to delete pv name: %s, (%v)", list.Items[i].Name, err)
 				}
 			}

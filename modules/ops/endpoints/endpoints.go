@@ -14,6 +14,7 @@
 package endpoints
 
 import (
+	manager "github.com/erda-project/erda/providers/cluster-manager"
 	"net/http"
 
 	"github.com/erda-project/erda/modules/ops/services/kubernetes"
@@ -34,9 +35,9 @@ import (
 )
 
 type Endpoints struct {
-	bdl      *bundle.Bundle
-	dbclient *dbclient.DBClient
-
+	bdl          *bundle.Bundle
+	dbclient     *dbclient.DBClient
+	manager      manager.Interface
 	nodes        *nodes.Nodes
 	labels       *labels.Labels
 	clusters     *clusters.Clusters
@@ -51,7 +52,7 @@ type Endpoints struct {
 
 type Option func(*Endpoints)
 
-func New(db *dbclient.DBClient, js jsonstore.JsonStore, cachedJS jsonstore.JsonStore, options ...Option) *Endpoints {
+func New(db *dbclient.DBClient, manager manager.Interface, js jsonstore.JsonStore, cachedJS jsonstore.JsonStore, options ...Option) *Endpoints {
 	e := &Endpoints{}
 
 	for _, op := range options {
@@ -60,7 +61,7 @@ func New(db *dbclient.DBClient, js jsonstore.JsonStore, cachedJS jsonstore.JsonS
 	e.dbclient = db
 	e.labels = labels.New(db, e.bdl)
 	e.nodes = nodes.New(db, e.bdl)
-	e.clusters = clusters.New(db, e.bdl)
+	e.clusters = clusters.New(db, e.bdl, manager)
 	e.Mns = mns.New(db, e.bdl, e.nodes, js)
 	e.Ess = ess.New(e.bdl, e.Mns, e.nodes, e.labels)
 	e.CloudAccount = cloud_account.New(db, cachedJS)
@@ -97,6 +98,7 @@ func (e *Endpoints) Routes() []httpserver.Endpoint {
 		{Path: "/api/node-logs", Method: http.MethodGet, Handler: auth(i18nPrinter(e.Logs))},
 		{Path: "/api/cluster/actions/upgrade", Method: http.MethodPost, Handler: auth(i18nPrinter(e.UpgradeEdgeCluster))},
 		{Path: "/api/cluster/actions/batch-upgrade", Method: http.MethodPost, Handler: auth(i18nPrinter(e.BatchUpgradeEdgeCluster))},
+		{Path: "/api/cluster/actions/init", Method: http.MethodPost, Handler: auth(i18nPrinter(e.ClusterInit))},
 		{Path: "/api/cluster", Method: http.MethodDelete, Handler: auth(i18nPrinter(e.OfflineEdgeCluster))},
 		{Path: "/api/cluster", Method: http.MethodGet, Handler: auth(i18nPrinter(e.ClusterInfo))},
 		{Path: "/api/org-cluster-info", Method: http.MethodGet, Handler: auth(i18nPrinter(e.OrgClusterInfo))},

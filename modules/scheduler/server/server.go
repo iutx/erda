@@ -89,7 +89,6 @@ func NewServer(addr string) *Server {
 	}
 	js, err := jsonstore.New()
 	volumeImpl := volume.NewVolumeImpl(drivers)
-	//metricImpl := metric.New()
 	clusterImpl := cluster.NewClusterImpl(store)
 	clusterinfoImpl := clusterinfo.NewClusterInfoImpl(js)
 	servicegroupImpl := servicegroup.NewServiceGroupImpl(store, sched, clusterinfoImpl)
@@ -230,8 +229,6 @@ func (s *Server) initEndpoints() {
 
 		// creating cluster by hooking colony-soldier's event
 		{"/clusterhook", http.MethodPost, s.httpendpoints.ClusterHook},
-		// DEPRECATED
-		{"/clusters", http.MethodPost, s.httpendpoints.ClusterCreate},
 
 		{"/api/nodelabels", http.MethodGet, s.httpendpoints.LabelList},
 		{"/api/nodelabels", http.MethodPost, s.httpendpoints.SetNodeLabels},

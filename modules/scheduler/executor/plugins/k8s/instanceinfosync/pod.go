@@ -14,7 +14,14 @@
 package instanceinfosync
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	wathchtool "k8s.io/client-go/tools/watch"
 	"strconv"
 	"time"
 
@@ -637,7 +644,7 @@ func updatePodAndInstance(dbclient *instanceinfo.Client, podlist *corev1.PodList
 	return nil
 }
 
-func updatePodOnWatch(bdl *bundle.Bundle, db *instanceinfo.Client, addr string) (func(*corev1.Pod), func(*corev1.Pod)) {
+func updatePodOnWatch(bdl *bundle.Bundle, db *instanceinfo.Client) (func(*corev1.Pod), func(*corev1.Pod)) {
 	addOrUpdateFunc := func(pod *corev1.Pod) {
 		if err := updatePodAndInstance(db, &corev1.PodList{Items: []corev1.Pod{*pod}}, false, nil); err != nil {
 			logrus.Errorf("failed to update pod: %v", err)
@@ -697,4 +704,68 @@ func calcPodResource(pod corev1.Pod) (memRequest int, memLimit int, cpuRequest f
 		cpuLimit += cpuLimitOne
 	}
 	return
+}
+
+func WatchPodInAllNamespace(ctx context.Context, client *kubernetes.Clientset, addFunc, updateFunc, deleteFunc func(*corev1.Pod)) error {
+	curPodList, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{Limit: 10})
+	if err != nil {
+		logrus.Errorf("list pod (limit: 10) error: %v", err)
+		return err
+	}
+
+	retryWatcher, err := wathchtool.NewRetryWatcher(curPodList.GetResourceVersion(), &cache.ListWatch{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.FieldSelector = "metadata.namespace!=kube-system"
+			return client.CoreV1().Pods(metav1.NamespaceAll).Watch(ctx, options)
+		},
+	})
+
+	if err != nil {
+		logrus.Errorf("watch pod expand kube-system namespace error: %v", err)
+		return err
+	}
+
+	defer func() {
+		retryWatcher.Stop()
+		logrus.Info("watch coreV1.pod resource done")
+		retryWatcher.Done()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case res, ok := <-retryWatcher.ResultChan():
+			if !ok {
+				logrus.Error("watch coreV1.pod resource closed unexpectedly")
+				break
+			}
+
+			if res.Object == nil {
+				continue
+			}
+
+			pod := corev1.Pod{}
+			bytePod, err := json.Marshal(res.Object)
+			if err != nil {
+				logrus.Errorf("failed to marshal event obj, err: %v", err)
+				continue
+			}
+			if err = json.Unmarshal(bytePod, &pod); err != nil {
+				logrus.Errorf("failed to unmarshal event obj to pod obj, err: %v", err)
+				continue
+			}
+
+			switch res.Type {
+			case watch.Added:
+				addFunc(&pod)
+			case watch.Modified:
+				updateFunc(&pod)
+			case watch.Deleted:
+				deleteFunc(&pod)
+			case watch.Error, watch.Bookmark:
+				logrus.Infof("ignore event: %v, %v", watch.Error, watch.Bookmark)
+			}
+		}
+	}
 }

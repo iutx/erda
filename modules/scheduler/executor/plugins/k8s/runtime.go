@@ -21,6 +21,9 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
@@ -77,7 +80,7 @@ func (k *Kubernetes) createRuntime(sg *apistructs.ServiceGroup) error {
 
 func (k *Kubernetes) destroyRuntime(ns string) error {
 	// Deleting a namespace will cascade delete the resources under that namespace
-	return k.DeleteNamespace(ns)
+	return k.k8sClient.CoreV1().Namespaces().Delete(context.Background(), ns, metav1.DeleteOptions{})
 }
 
 func (k *Kubernetes) destroyRuntimeByProjectNamespace(ns string, sg *apistructs.ServiceGroup) error {
@@ -94,9 +97,9 @@ func (k *Kubernetes) destroyRuntimeByProjectNamespace(ns string, sg *apistructs.
 
 		switch service.WorkLoad {
 		case ServicePerNode:
-			err = k.deleteDaemonSet(ns, service.Name)
+			err = k.k8sClient.AppsV1().DaemonSets(ns).Delete(context.Background(), service.Name, metav1.DeleteOptions{})
 		default:
-			err = k.deleteDeployment(ns, service.Name)
+			err = k.k8sClient.AppsV1().Deployments(ns).Delete(context.Background(), service.Name, metav1.DeleteOptions{})
 		}
 		if err != nil {
 			return fmt.Errorf("delete resource %s, %s error: %v", service.WorkLoad, service.Name, err)
@@ -106,7 +109,10 @@ func (k *Kubernetes) destroyRuntimeByProjectNamespace(ns string, sg *apistructs.
 			"app": originServiceName,
 		}
 
-		deploys, err := k.deploy.List(ns, labelSelector)
+		deploys, err := k.k8sClient.AppsV1().Deployments(ns).List(context.Background(), metav1.ListOptions{
+			LabelSelector: labels.Set(labelSelector).String(),
+		})
+
 		if err != nil {
 			return fmt.Errorf("list pod resource error: %v in the namespace %s", err, service.Name)
 		}
@@ -119,7 +125,7 @@ func (k *Kubernetes) destroyRuntimeByProjectNamespace(ns string, sg *apistructs.
 		}
 
 		if remainCount < 1 {
-			err = k.service.Delete(ns, originServiceName)
+			err = k.k8sClient.CoreV1().Services(ns).Delete(context.Background(), originServiceName, metav1.DeleteOptions{})
 			if err != nil {
 				return fmt.Errorf("delete service %s error: %v", service.Name, err)
 			}
@@ -182,7 +188,7 @@ func (k *Kubernetes) createStatelessGroup(sg *apistructs.ServiceGroup, layers []
 					return
 				}
 
-				if k8serror.NotFound(delErr) {
+				if k8serrors.IsNotFound(delErr) {
 					logrus.Infof("failed to destroy namespace, ns: %s, (namespace not found)", ns)
 					return
 				}
@@ -202,7 +208,7 @@ func (k *Kubernetes) CreateStatefulGroup(sg *apistructs.ServiceGroup, layers [][
 		return k8serror.ErrInvalidParams
 	}
 	// Judge the group from the label, each group is a statefulset
-	groups, err := groupStatefulset(sg)
+	groups, err := groupStatefulSet(sg)
 	if err != nil {
 		logrus.Infof(err.Error())
 		return err
@@ -336,7 +342,7 @@ func (k *Kubernetes) inspectStateless(sg *apistructs.ServiceGroup) (*apistructs.
 
 func (k *Kubernetes) InspectStateful(sg *apistructs.ServiceGroup) (*apistructs.ServiceGroup, error) {
 	namespace := MakeNamespace(sg)
-	name := statefulsetName(sg)
+	name := getStatefulSetName(sg)
 	// have only one statefulset
 	if !strings.HasPrefix(namespace, "group-") {
 		info, err := k.inspectOne(sg, namespace, name, 0)

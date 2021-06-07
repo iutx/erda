@@ -14,7 +14,9 @@
 package k8s
 
 import (
+	"context"
 	"fmt"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"reflect"
 	"strconv"
 	"strings"
@@ -22,10 +24,10 @@ import (
 	"github.com/pkg/errors"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/erda-project/erda/apistructs"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
 	"github.com/erda-project/erda/pkg/istioctl"
 	"github.com/erda-project/erda/pkg/strutil"
 )
@@ -33,22 +35,28 @@ import (
 // CreateService create k8s service
 func (k *Kubernetes) CreateService(service *apistructs.Service) error {
 	svc := newService(service)
-	return k.service.Create(svc)
+	_, err := k.k8sClient.CoreV1().Services(svc.Namespace).Create(context.Background(), svc, metav1.CreateOptions{})
+	return err
 }
 
 // PutService update k8s service
 func (k *Kubernetes) PutService(svc *apiv1.Service) error {
-	return k.service.Put(svc)
+	_, err := k.k8sClient.CoreV1().Services(svc.Namespace).Update(context.TODO(), svc, metav1.UpdateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // GetService get k8s service
 func (k *Kubernetes) GetService(namespace, name string) (*apiv1.Service, error) {
-	return k.service.Get(namespace, name)
+	return k.k8sClient.CoreV1().Services(namespace).Get(context.Background(), name, metav1.GetOptions{})
 }
 
 // DeleteService delete k8s service
 func (k *Kubernetes) DeleteService(namespace, name string) error {
-	return k.service.Delete(namespace, name)
+	return k.k8sClient.CoreV1().Services(namespace).Delete(context.Background(), name, metav1.DeleteOptions{})
 }
 
 // Port changes in the service description will cause changes in services and ingress
@@ -64,12 +72,12 @@ func (k *Kubernetes) updateService(service *apistructs.Service) error {
 	}
 
 	svc, getErr := k.GetService(service.Namespace, service.Name)
-	if getErr != nil && getErr != k8serror.ErrNotFound {
+	if getErr != nil && !k8serrors.IsNotFound(getErr) {
 		return errors.Errorf("failed to get service, name: %s, (%v)", service.Name, getErr)
 	}
 
 	// If not found, create a new k8s service
-	if getErr == k8serror.ErrNotFound {
+	if k8serrors.IsNotFound(getErr) {
 		if err := k.CreateService(service); err != nil {
 			return err
 		}
@@ -156,25 +164,32 @@ func diffServiceMetadata(left, right *apiv1.Service) bool {
 // actually get deployment's names list, as k8s service would not be created
 // if no ports exposed
 func (k *Kubernetes) listServiceName(namespace string, labelSelector map[string]string) ([]string, error) {
-	strs := make([]string, 0)
-	deployList, err := k.deploy.List(namespace, labelSelector)
+	srvNames := make([]string, 0)
+
+	deployList, err := k.k8sClient.AppsV1().Deployments(namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labels.Set(labelSelector).String(),
+	})
+
 	if err != nil {
-		return strs, err
+		return srvNames, err
 	}
 
 	for _, item := range deployList.Items {
-		strs = append(strs, item.Name)
+		srvNames = append(srvNames, item.Name)
 	}
 
-	daemonSets, err := k.ds.List(namespace, labelSelector)
+	dss, err := k.k8sClient.AppsV1().DaemonSets(namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labels.Set(labelSelector).String(),
+	})
 	if err != nil {
-		return strs, err
-	}
-	for _, item := range daemonSets.Items {
-		strs = append(strs, item.Name)
+		return srvNames, err
 	}
 
-	return strs, nil
+	for _, item := range dss.Items {
+		srvNames = append(srvNames, item.Name)
+	}
+
+	return srvNames, nil
 }
 
 func getServiceName(service *apistructs.Service) string {
@@ -192,7 +207,7 @@ func setServiceLabelSelector(service *apistructs.Service, k8sService *apiv1.Serv
 
 func (k *Kubernetes) deleteRuntimeServiceWithProjectNamespace(service apistructs.Service) error {
 	if service.Env[ProjectNamespace] == "true" {
-		err := k.service.Delete(service.Namespace, service.Env[ProjectNamespaceServiceNameNameKey])
+		err := k.DeleteService(service.Namespace, service.Env[ProjectNamespaceServiceNameNameKey])
 		if err != nil {
 			return fmt.Errorf("delete service %s error: %v", service.Name, err)
 		}

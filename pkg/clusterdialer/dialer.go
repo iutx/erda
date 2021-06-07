@@ -16,18 +16,15 @@ package clusterdialer
 import (
 	"context"
 	"fmt"
-	"net"
-
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-
-	"github.com/erda-project/erda/pkg/discover"
+	"net"
 )
 
 var session TunnelSession
 
 func init() {
-	clusterDialerEndpoint := fmt.Sprintf("ws://%s%s", discover.ClusterDialer(), "/clusterdialer")
+	clusterDialerEndpoint := fmt.Sprintf("ws://%s%s", "cluster-dialer.default.svc.cluster.local", "/clusterdialer")
 	go session.initialize(clusterDialerEndpoint)
 }
 

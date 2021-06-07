@@ -14,7 +14,10 @@
 package daemonset
 
 import (
+	"context"
 	"fmt"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
@@ -29,24 +32,17 @@ import (
 )
 
 type DaemonsetOperator struct {
-	k8s         addon.K8SUtil
-	ns          addon.NamespaceUtil
+	k8sClient   *kubernetes.Clientset
 	imageSecret addon.ImageSecretUtil
-	healthcheck addon.HealthcheckUtil
-	daemonset   addon.DaemonsetUtil
-	overcommit  addon.OvercommitUtil
+	healthCheck addon.HealthcheckUtil
+	overCommit  addon.OvercommitUtil
 }
 
-func New(k8s addon.K8SUtil, ns addon.NamespaceUtil, imageSecret addon.ImageSecretUtil,
-	healthcheck addon.HealthcheckUtil, daemonset addon.DaemonsetUtil,
-	overcommit addon.OvercommitUtil) *DaemonsetOperator {
+func New(imageSecret addon.ImageSecretUtil, healthCheck addon.HealthcheckUtil, overCommit addon.OvercommitUtil) *DaemonsetOperator {
 	return &DaemonsetOperator{
-		k8s:         k8s,
-		ns:          ns,
 		imageSecret: imageSecret,
-		healthcheck: healthcheck,
-		daemonset:   daemonset,
-		overcommit:  overcommit,
+		healthCheck: healthCheck,
+		overCommit:  overCommit,
 	}
 }
 
@@ -72,7 +68,7 @@ func (d *DaemonsetOperator) Validate(sg *apistructs.ServiceGroup) error {
 func (d *DaemonsetOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 	service := sg.Services[0]
 	affinity := constraintbuilders.K8S(&sg.ScheduleInfo2, &service, nil, nil).Affinity
-	probe := d.healthcheck.NewHealthcheckProbe(&service)
+	probe := d.healthCheck.NewHealthcheckProbe(&service)
 	container := corev1.Container{
 		Name:  service.Name,
 		Image: service.Image,
@@ -83,9 +79,9 @@ func (d *DaemonsetOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 			},
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU: resource.MustParse(
-					fmt.Sprintf("%.fm", d.overcommit.CPUOvercommit(service.Resources.Cpu*1000))),
+					fmt.Sprintf("%.fm", d.overCommit.CPUOvercommit(service.Resources.Cpu*1000))),
 				corev1.ResourceMemory: resource.MustParse(
-					fmt.Sprintf("%.dMi", d.overcommit.MemoryOvercommit(int(service.Resources.Mem)))),
+					fmt.Sprintf("%.dMi", d.overCommit.MemoryOvercommit(int(service.Resources.Mem)))),
 			},
 		},
 		Command:        []string{"sh", "-c", service.Cmd},
@@ -128,25 +124,39 @@ func (d *DaemonsetOperator) Create(k8syml interface{}) error {
 	if !ok {
 		return fmt.Errorf("[BUG] this k8syml should be DaemonSet")
 	}
-	if err := d.ns.Exists(ds.Namespace); err != nil {
-		if err := d.ns.Create(ds.Namespace, nil); err != nil && !strutil.Contains(err.Error(), "AlreadyExists") {
-			logrus.Errorf("failed to create ns: %s, %v", ds.Namespace, err)
-			return err
-		}
+
+	_, err := d.k8sClient.CoreV1().Namespaces().Create(context.Background(), &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ds.Namespace,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return err
 	}
+
 	if err := d.imageSecret.NewImageSecret(ds.Namespace); err != nil {
 		logrus.Errorf("failed to NewImageSecret for ns: %s, %v", ds.Namespace, err)
 		return err
 	}
-	if err := d.daemonset.Create(&ds); err != nil {
+
+	_, err = d.k8sClient.AppsV1().DaemonSets(ds.Namespace).Create(context.Background(), &ds, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
 func (d *DaemonsetOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.ServiceGroup, error) {
 	service := &(sg.Services[0])
-	ds, err := d.daemonset.Get(genK8SNamespace(sg.Type, sg.ID), service.Name)
+	nsName := genK8SNamespace(sg.Type, sg.ID)
+
+	ds, err := d.k8sClient.AppsV1().DaemonSets(nsName).Get(context.Background(), service.Name, metav1.GetOptions{})
+
 	if err != nil {
 		logrus.Errorf("failed to get ds: %s/%s, %v", genK8SNamespace(sg.Type, sg.ID), service.Name, err)
 		return nil, err
@@ -160,19 +170,22 @@ func (d *DaemonsetOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Se
 }
 
 func (d *DaemonsetOperator) Remove(sg *apistructs.ServiceGroup) error {
-	if err := d.ns.Delete(genK8SNamespace(sg.Type, sg.ID)); err != nil {
+	nsName := genK8SNamespace(sg.Type, sg.ID)
+	if err := d.k8sClient.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{}); err != nil {
 		logrus.Errorf("failed to remove ns: %s, %v", genK8SNamespace(sg.Type, sg.ID), err)
 		return err
 	}
 	return nil
 }
 
-func (d *DaemonsetOperator) Update(k8syml interface{}) error {
-	ds, ok := k8syml.(appsv1.DaemonSet)
+func (d *DaemonsetOperator) Update(k8sYml interface{}) error {
+	ds, ok := k8sYml.(appsv1.DaemonSet)
 	if !ok {
-		return fmt.Errorf("[BUG] this k8syml should be DaemonSet")
+		return fmt.Errorf("[BUG] this k8s yaml should be DaemonSet")
 	}
-	if err := d.daemonset.Update(&ds); err != nil {
+
+	_, err := d.k8sClient.AppsV1().DaemonSets(ds.Namespace).Update(context.Background(), &ds, metav1.UpdateOptions{})
+	if err != nil {
 		logrus.Errorf("failed to update ds: %s/%s, %v", ds.Namespace, ds.Name, err)
 		return err
 	}
@@ -184,7 +197,7 @@ func genK8SNamespace(namespace, name string) string {
 }
 
 func envs(envs map[string]string) []corev1.EnvVar {
-	r := []corev1.EnvVar{}
+	r := make([]corev1.EnvVar, 0)
 	for k, v := range envs {
 		r = append(r, corev1.EnvVar{
 			Name:  k,

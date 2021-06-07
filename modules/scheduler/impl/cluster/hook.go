@@ -98,7 +98,10 @@ func (c *ClusterImpl) Hook(clusterEvent *apistructs.ClusterEvent) error {
 			}
 		}
 		return nil
+	} else if clusterEvent.Action == clusterActionDelete {
+		return c.deleteExecutor(clusterEvent.Content.Name)
 	}
+
 	return errors.Wrap(ErrInvalidAction, clusterEvent.Action)
 }
 
@@ -259,24 +262,26 @@ func (c *ClusterImpl) handleK8SCluster(clusterEvent *apistructs.ClusterEvent) er
 		return c.createK8SExecutor(clusterEvent)
 	} else if clusterEvent.Action == clusterActionUpdate {
 		return c.updateK8SExecutor(clusterEvent)
+	} else if clusterEvent.Action == clusterActionDelete {
+		return c.deleteExecutor(clusterEvent.Content.Name)
 	}
 	return nil
 }
 
 func (c *ClusterImpl) createK8SExecutor(clusterEvent *apistructs.ClusterEvent) error {
+	svcOptions := createK8sOptions(clusterEvent.Content)
 	serviceCfg := ClusterInfo{
 		ClusterName:  clusterEvent.Content.Name,
 		ExecutorName: clusterutil.GenerateExecutorByCluster(clusterEvent.Content.Name, clusterutil.ServiceKindMarathon),
 		Kind:         clusterutil.ServiceKindK8S,
-		Options: map[string]string{
-			"cluster":                     clusterEvent.Content.Name,
-			"ADDR":                        clusterEvent.Content.SchedConfig.MasterURL,
-			"DEV_CPU_SUBSCRIBE_RATIO":     clusterEvent.Content.SchedConfig.CPUSubscribeRatio,
-			"TEST_CPU_SUBSCRIBE_RATIO":    clusterEvent.Content.SchedConfig.CPUSubscribeRatio,
-			"STAGING_CPU_SUBSCRIBE_RATIO": clusterEvent.Content.SchedConfig.CPUSubscribeRatio,
-		},
 	}
-	setDefaultClusterConfig(&serviceCfg)
+
+	svcOptions["cluster"] = clusterEvent.Content.Name
+	svcOptions["DEV_CPU_SUBSCRIBE_RATIO"] = clusterEvent.Content.SchedConfig.DevCPUSubscribeRatio
+	svcOptions["TEST_CPU_SUBSCRIBE_RATIO"] = clusterEvent.Content.SchedConfig.TestCPUSubscribeRatio
+	svcOptions["STAGING_CPU_SUBSCRIBE_RATIO"] = clusterEvent.Content.SchedConfig.StagingCPUSubscribeRatio
+
+	serviceCfg.Options = svcOptions
 
 	svcPath := strutil.Concat(clusterPrefix, clusterEvent.Content.Name, clusterK8SSuffix)
 	if err := create(c.js, svcPath, serviceCfg); err != nil {
@@ -288,11 +293,8 @@ func (c *ClusterImpl) createK8SExecutor(clusterEvent *apistructs.ClusterEvent) e
 		ClusterName:  clusterEvent.Content.Name,
 		ExecutorName: clusterutil.GenerateExecutorByCluster(clusterEvent.Content.Name, clusterutil.JobKindMetronome),
 		Kind:         clusterutil.JobKindK8S,
-		Options: map[string]string{
-			"ADDR": clusterEvent.Content.SchedConfig.MasterURL,
-		},
+		Options:      createK8sOptions(clusterEvent.Content),
 	}
-	setDefaultClusterConfig(&jobCfg)
 
 	jobPath := strutil.Concat(clusterPrefix, clusterEvent.Content.Name, clusterK8SJobSuffix)
 	if err := create(c.js, jobPath, jobCfg); err != nil {
@@ -337,24 +339,68 @@ func (c *ClusterImpl) updateK8SExecutor(clusterEvent *apistructs.ClusterEvent) e
 	return nil
 }
 
-// todo: Only support to modify the address at the moment
 func patchK8SConfig(local *ClusterInfo, request *apistructs.ClusterInfo) error {
-	if request.SchedConfig != nil {
-		if request.SchedConfig.MasterURL != "" {
-			u, err := url.Parse(request.SchedConfig.MasterURL)
-			if err != nil {
-				return errors.Errorf("k8s cluster addr is invalid, addr: %s", request.SchedConfig.MasterURL)
-			}
-			local.Options["ADDR"] = u.String()
-			c, err := url.Parse(request.SchedConfig.CPUSubscribeRatio)
-			if err != nil {
-				return errors.Errorf("k8s cluster addr is invalid, addr: %s", request.SchedConfig.MasterURL)
-			}
-			local.Options["DEV_CPU_SUBSCRIBE_RATIO"] = c.String()
-			local.Options["TEST_CPU_SUBSCRIBE_RATIO"] = c.String()
-			local.Options["STAGING_CPU_SUBSCRIBE_RATIO"] = c.String()
-		}
+	// Patch:
+	// ManageConfig: Kind contains k8s
+	// ADDR(Inet): Path inet type ADDR only
+	// CPU SUBSCRIBE RATIO: Kind == K8S
+
+	if request.SchedConfig == nil {
+		return nil
 	}
+
+	// Patch inet address.
+	if request.SchedConfig.MasterURL != "" {
+		u, err := url.Parse(request.SchedConfig.MasterURL)
+		if err != nil {
+			return errors.Errorf("k8s cluster addr is invalid, addr: %s", request.SchedConfig.MasterURL)
+		}
+		local.Options["ADDR"] = u.String()
+	}
+
+	// Cpu subscribe ratio, TODO: Support config to user for different workspace.
+	if local.Kind == clusterutil.ServiceKindK8S {
+		local.Options["DEV_CPU_SUBSCRIBE_RATIO"] = request.SchedConfig.CPUSubscribeRatio
+		local.Options["TEST_CPU_SUBSCRIBE_RATIO"] = request.SchedConfig.CPUSubscribeRatio
+		local.Options["STAGING_CPU_SUBSCRIBE_RATIO"] = request.SchedConfig.CPUSubscribeRatio
+	}
+
+	// Use inet method.
+	if request.ManageConfig == nil {
+		return nil
+	}
+
+	// Patch cluster addr
+	local.Options["ADDR"] = request.ManageConfig.Address
+	// Patch manage type
+	local.Options["TYPE"] = request.ManageConfig.Type
+	// Patch insecure parameter
+	local.Options["INSECURE"] = strconv.FormatBool(request.ManageConfig.Insecure)
+	// Patch ca data
+	local.Options["CA_DATA"] = request.ManageConfig.CaData
+
+	// Patch new connect info whether type changed or not.
+	switch request.ManageConfig.Type {
+	case apistructs.ManageToken, apistructs.ManageProxy:
+		local.Options["TOKEN"] = request.ManageConfig.Token
+		delete(local.Options, "CERT_DATA")
+		delete(local.Options, "KEY_DATA")
+	case apistructs.ManageCert:
+		local.Options["CERT_DATA"] = request.ManageConfig.CertData
+		local.Options["KEY_DATA"] = request.ManageConfig.KeyData
+		delete(local.Options, "TOKEN")
+	case apistructs.ManageInet:
+		// Patch inet url already.
+		fallthrough
+	default:
+		delete(local.Options, "TOKEN")
+		delete(local.Options, "CERT_DATA")
+		delete(local.Options, "KEY_DATA")
+		delete(local.Options, "INSECURE")
+		delete(local.Options, "CA_DATA")
+		return nil
+	}
+
 	return nil
 }
 
@@ -369,6 +415,8 @@ func (c *ClusterImpl) handleEdasCluster(clusterEvent *apistructs.ClusterEvent) e
 		return c.createEdasExecutor(clusterEvent)
 	} else if clusterEvent.Action == clusterActionUpdate {
 		return c.updateEdasExecutor(clusterEvent)
+	} else if clusterEvent.Action == clusterActionDelete {
+		return c.deleteExecutor(clusterEvent.Content.Name)
 	}
 	return nil
 }
@@ -484,6 +532,22 @@ func (c *ClusterImpl) updateEdasExecutor(clusterEvent *apistructs.ClusterEvent) 
 	return nil
 }
 
+func (c *ClusterImpl) deleteExecutor(clusterName string) error {
+	keys, err := c.findKeysByCluster(clusterName)
+	if err != nil {
+		return err
+	}
+
+	for _, k := range keys {
+		if err := c.js.Remove(context.Background(), k, nil); err != nil {
+			content := fmt.Sprintf("delete cluster(%s, key: %s) to etcd error: %v", clusterName, k, err)
+			return errors.New(content)
+		}
+	}
+
+	return nil
+}
+
 // update edas executor
 func patchEdasConfig(local *ClusterInfo, request *apistructs.ClusterInfo) error {
 	if request.SchedConfig != nil {
@@ -504,26 +568,64 @@ func createK8SFlinkExecutor(clusterEvent *apistructs.ClusterEvent, js jsonstore.
 		ClusterName:  clusterEvent.Content.Name,
 		ExecutorName: clusterutil.GenerateExecutorByCluster(clusterEvent.Content.Name, clusterutil.K8SKindFlink),
 		Kind:         clusterutil.K8SKindFlink,
-		Options: map[string]string{
-			"ADDR": clusterEvent.Content.SchedConfig.MasterURL,
-		},
-		OptionsPlus: nil,
+		Options:      createK8sOptions(clusterEvent.Content),
+		OptionsPlus:  nil,
 	}
 	flinkKey := strutil.Concat(clusterPrefix, clusterEvent.Content.Name, clusterK8SFlinkSuffix)
 	return create(js, flinkKey, flinkCfg)
 }
 
 func createK8SSparkExecutor(clusterEvent *apistructs.ClusterEvent, js jsonstore.JsonStore) error {
+	sparkOptions := createK8sOptions(clusterEvent.Content)
 	sparkCfg := ClusterInfo{
 		ClusterName:  clusterEvent.Content.Name,
 		ExecutorName: clusterutil.GenerateExecutorByCluster(clusterEvent.Content.Name, clusterutil.K8SKindSpark),
 		Kind:         clusterutil.K8SKindSpark,
-		Options: map[string]string{
-			"ADDR":          clusterEvent.Content.SchedConfig.MasterURL,
-			"SPARK_VERSION": clusterutil.K8SSparkVersion,
-		},
-		OptionsPlus: nil,
 	}
+	sparkOptions["SPARK_VERSION"] = clusterutil.K8SSparkVersion
+	sparkCfg.Options = sparkOptions
+
 	sparkKey := strutil.Concat(clusterPrefix, clusterEvent.Content.Name, clusterK8SSparkSuffix)
 	return create(js, sparkKey, sparkCfg)
+}
+
+func createK8sOptions(cluster apistructs.ClusterInfo) map[string]string {
+	options := make(map[string]string, 0)
+	manageConfig := cluster.ManageConfig
+
+	// Compatible with manage method of inet.
+	if manageConfig == nil {
+		options["ADDR"] = cluster.SchedConfig.MasterURL
+		options["TYPE"] = apistructs.ManageInet
+		return options
+	}
+
+	options["TYPE"] = cluster.ManageConfig.Type
+
+	switch manageConfig.Type {
+	case apistructs.ManageToken, apistructs.ManageCert, apistructs.ManageProxy:
+		options["ADDR"] = cluster.ManageConfig.Address
+		options["INSECURE"] = strconv.FormatBool(manageConfig.Insecure)
+
+		if !manageConfig.Insecure {
+			options["CA_DATA"] = cluster.ManageConfig.CaData
+		}
+
+		if manageConfig.Type == apistructs.ManageToken || manageConfig.Type == apistructs.ManageProxy {
+			options["TOKEN"] = cluster.ManageConfig.Token
+			return options
+		}
+
+		if manageConfig.Type == apistructs.ManageCert {
+			options["CERT_DATA"] = cluster.ManageConfig.CertData
+			options["KEY_DATA"] = cluster.ManageConfig.KeyData
+			return options
+		}
+	case apistructs.ManageInet:
+		fallthrough
+	default:
+		options["ADDR"] = cluster.SchedConfig.MasterURL
+	}
+
+	return options
 }

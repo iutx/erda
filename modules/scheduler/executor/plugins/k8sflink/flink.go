@@ -17,17 +17,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/erda-project/erda/modules/scheduler/executor/util"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/scheduler/executor/executortypes"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8sjob"
 	flinkoperatorv1beta1 "github.com/erda-project/erda/pkg/clientgo/apis/flinkoperator/v1beta1"
-	"github.com/erda-project/erda/pkg/strutil"
 )
 
 const (
@@ -37,13 +38,29 @@ const (
 )
 
 func init() {
-	executortypes.Register(kind, func(name executortypes.Name, clustername string, options map[string]string, moreoptions interface{}) (executortypes.Executor, error) {
+	executortypes.Register(kind, func(name executortypes.Name, clusterName string, options map[string]string, moreoptions interface{}) (executortypes.Executor, error) {
 		addr := options["ADDR"]
 		f := New(
 			WithClient(addr),
 			WithKind(kind),
 			WithName(name),
 		)
+
+		k8sClient, err := util.GetClientSet(clusterName, options)
+		if err != nil {
+			return nil, err
+		}
+		f.Client = k8sClient
+
+		// TODELETE
+		fmt.Println(options["SPARK_VERSION"])
+		np, err := k8sClient.CustomClient.FlinkoperatorV1beta1().FlinkClusters(metav1.NamespaceAll).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			logrus.Error("[flink]client-go connect test------>", err.Error())
+			return nil, err
+		}
+		fmt.Println("[flink]client-go connect test------>", len(np.Items), clusterName)
+
 		return f, nil
 	})
 }
@@ -349,11 +366,12 @@ func (f *Flink) createImageSecretIfNotExist(namespace string) error {
 		Type:       s.Type,
 	}
 
-	if _, err := f.Client.K8sClient.CoreV1().Secrets(namespace).Create(context.Background(), mysecret, metav1.CreateOptions{}); err != nil {
-		if strutil.Contains(err.Error(), "AlreadyExists") {
+	if _, err = f.Client.K8sClient.CoreV1().Secrets(namespace).Create(context.Background(), mysecret, metav1.CreateOptions{}); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
 			return nil
 		}
 		return err
 	}
+
 	return nil
 }

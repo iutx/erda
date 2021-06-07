@@ -14,13 +14,13 @@
 package v1beta1
 
 import (
+	"github.com/erda-project/erda/pkg/clientgo/restclient"
 	secv1beta1_api "istio.io/client-go/pkg/apis/security/v1beta1"
 	secv1beta1 "istio.io/client-go/pkg/clientset/versioned/typed/security/v1beta1"
 	"k8s.io/client-go/rest"
-
-	"github.com/erda-project/erda/pkg/clientgo/restclient"
 )
 
+// NewSecurityClient creates a new SecurityV1beta1Client for the given addr.
 func NewSecurityClient(addr string) (*secv1beta1.SecurityV1beta1Client, error) {
 	config := restclient.GetDefaultConfig("")
 	config.GroupVersion = &secv1beta1_api.SchemeGroupVersion
@@ -35,4 +35,14 @@ func NewSecurityClient(addr string) (*secv1beta1.SecurityV1beta1Client, error) {
 		return nil, err
 	}
 	return secv1beta1.New(client), nil
+}
+
+// NewSecurityClientWithConfig creates a new SecurityV1beta1Client for the given kubeconfig
+func NewSecurityClientWithConfig(restConfig *rest.Config) (*secv1beta1.SecurityV1beta1Client, error) {
+	client, err := secv1beta1.NewForConfig(restConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return client, nil
 }

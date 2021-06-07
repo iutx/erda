@@ -14,21 +14,23 @@
 package k8sspark
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
-	sparkv1beta2 "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8sjob"
 	"github.com/erda-project/erda/modules/scheduler/schedulepolicy/labelconfig"
+	sparkv1beta2 "github.com/erda-project/erda/pkg/clientgo/apis/sparkoperator/v1beta2"
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
@@ -250,7 +252,9 @@ func (s *k8sSpark) preparePVCForJob(job *apistructs.Job) error {
 		if pvc == nil {
 			continue
 		}
-		if err := s.pvc.Create(pvc); err != nil {
+
+		_, err := s.k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(context.Background(), pvc, metav1.CreateOptions{})
+		if err != nil {
 			return err
 		}
 	}
@@ -264,7 +268,7 @@ func (s *k8sSpark) preparePVCForJob(job *apistructs.Job) error {
 	return nil
 }
 
-func (s *k8sSpark) prepareNamespaceResouce(ns string) error {
+func (s *k8sSpark) prepareNamespaceResource(ns string) error {
 	var err error
 
 	if err = s.createNamespaceIfNotExist(ns); err != nil {
@@ -298,9 +302,25 @@ func (s *k8sSpark) prepareNamespaceResouce(ns string) error {
 	return nil
 }
 
-func (s *k8sSpark) createNamespaceIfNotExist(ns string) error {
-	if s.namespace.Exists(ns) != nil {
-		if err := s.namespace.Create(ns, nil); err != nil {
+func (s *k8sSpark) createNamespaceIfNotExist(nsName string) error {
+	_, err := s.k8sClient.CoreV1().Namespaces().Get(context.Background(), nsName, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return err
+		}
+
+		ns := &corev1.Namespace{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "v1",
+				Kind:       "Namespace",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: nsName,
+			},
+		}
+
+		_, err = s.k8sClient.CoreV1().Namespaces().Create(context.Background(), ns, metav1.CreateOptions{})
+		if err != nil {
 			return err
 		}
 	}
@@ -309,8 +329,12 @@ func (s *k8sSpark) createNamespaceIfNotExist(ns string) error {
 }
 
 func (s *k8sSpark) createSparkServiceAccountIfNotExist(ns string) error {
-	if s.sa.Exists(ns, sparkServiceAccountName) != nil {
-		if err := s.createSparkServiceAccount(ns); err != nil {
+	_, err := s.k8sClient.CoreV1().ServiceAccounts(ns).Get(context.Background(), sparkServiceAccountName, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return err
+		}
+		if err = s.createSparkServiceAccount(ns); err != nil {
 			return err
 		}
 	}
@@ -319,20 +343,22 @@ func (s *k8sSpark) createSparkServiceAccountIfNotExist(ns string) error {
 }
 
 func (s *k8sSpark) createSparkRoleIfNotExist(ns string) error {
-	if err := s.role.Exists(ns, sparkRoleName); err != nil {
-		if err := s.createSparkRole(ns); err != nil {
-			return err
+	if err := s.createSparkRole(ns); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			return nil
 		}
+		return err
 	}
 
 	return nil
 }
 
 func (s *k8sSpark) createSparkRolebindingIfNotExist(ns string) error {
-	if err := s.rolebinding.Exists(ns, sparkRoleBindingName); err != nil {
-		if err := s.createSparkRolebinding(ns); err != nil {
-			return err
+	if err := s.createSparkRolebinding(ns); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			return nil
 		}
+		return err
 	}
 
 	return nil
@@ -350,7 +376,8 @@ func (s *k8sSpark) createSparkServiceAccount(ns string) error {
 		},
 	}
 
-	if err := s.sa.Create(sa); err != nil {
+	_, err := s.k8sClient.CoreV1().ServiceAccounts(ns).Create(context.Background(), sa, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
 
@@ -381,7 +408,8 @@ func (s *k8sSpark) createSparkRole(ns string) error {
 		},
 	}
 
-	if err := s.role.Create(r); err != nil {
+	_, err := s.k8sClient.RbacV1().Roles(r.Namespace).Create(context.Background(), r, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
 
@@ -412,7 +440,8 @@ func (s *k8sSpark) createSparkRolebinding(ns string) error {
 		},
 	}
 
-	if err := s.rolebinding.Create(rb); err != nil {
+	_, err := s.k8sClient.RbacV1().RoleBindings(ns).Create(context.Background(), rb, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
 
@@ -420,16 +449,18 @@ func (s *k8sSpark) createSparkRolebinding(ns string) error {
 }
 
 func (s *k8sSpark) createImageSecretIfNotExist(ns, defaultSecret string) error {
-	if _, err := s.secret.Get(ns, k8s.AliyunRegistry); err == nil {
+	_, err := s.k8sClient.CoreV1().Secrets(ns).Get(context.Background(), defaultSecret, metav1.GetOptions{})
+	if err == nil {
 		return nil
 	}
 
 	// When the cluster is initialized, a secret to pull the mirror will be created in the default namespace
-	se, err := s.secret.Get("default", defaultSecret)
+	se, err := s.k8sClient.CoreV1().Secrets(metav1.NamespaceDefault).Get(context.Background(), defaultSecret, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	mysecret := &corev1.Secret{
+
+	newSe := &corev1.Secret{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
 			Kind:       "Secret",
@@ -443,8 +474,10 @@ func (s *k8sSpark) createImageSecretIfNotExist(ns, defaultSecret string) error {
 		Type:       se.Type,
 	}
 
-	if err := s.secret.Create(mysecret); err != nil {
+	_, err = s.k8sClient.CoreV1().Secrets(ns).Create(context.Background(), newSe, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
+
 	return nil
 }

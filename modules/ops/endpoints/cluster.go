@@ -283,6 +283,22 @@ func (e *Endpoints) ClusterUpdate(ctx context.Context, r *http.Request, vars map
 	})
 }
 
+func (e *Endpoints) ClusterInit(ctx context.Context, r *http.Request, vars map[string]string) (httpserver.Responser, error) {
+
+	var req apistructs.ClusterInitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errstr := fmt.Sprintf("failed to parse request body: %v", err)
+		return httpserver.ErrResp(200, "2", errstr)
+	}
+
+	e.clusters.InitClusters(req)
+
+	return mkResponse(apistructs.OpsClusterInfoResponse{
+		Header: apistructs.Header{Success: true},
+		Data:   nil,
+	})
+}
+
 func (e *Endpoints) handleUpdateReq(req *apistructs.ClusterUpdateRequest) string {
 	var as *ess.Ess
 	var isEdit bool

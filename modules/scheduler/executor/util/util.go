@@ -20,11 +20,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/erda-project/erda/apistructs"
-	"github.com/erda-project/erda/pkg/httpclient"
-
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+
+	"github.com/erda-project/erda/apistructs"
+	"github.com/erda-project/erda/pkg/clientgo"
+	"github.com/erda-project/erda/pkg/clientgo/restclient"
+	"github.com/erda-project/erda/pkg/httpclient"
 )
 
 type serviceDepends map[string]struct{}
@@ -234,4 +236,59 @@ func GetAndSetTokenAuth(client *httpclient.HTTPClient, executorName string) {
 	}
 
 	logrus.Debugf("env AUTH_TOKEN not set, executor(%s) goroutine exit", executorName)
+}
+
+// ParseManageConfig parse options from etcd, generate manageConfig
+func ParseManageConfig(options map[string]string) (*apistructs.ManageConfig, error) {
+	config := &apistructs.ManageConfig{
+		Type:     options["TYPE"],
+		Address:  options["ADDR"],
+		CaData:   options["CA_DATA"],
+		CertData: options["CERT_DATA"],
+		KeyData:  options["KEY_DATA"],
+		Token:    options["TOKEN"],
+	}
+
+	if config.Address == "" {
+		return nil, errors.Errorf("not found kubernetes address in manage config")
+	}
+
+	if len(options["INSECURE"]) > 0 {
+		inSecure, err := strconv.ParseBool(options["INSECURE"])
+		if err != nil {
+			return nil, err
+		}
+		config.Insecure = inSecure
+	}
+
+	return config, nil
+}
+
+// GetClientSet Get clientSet
+func GetClientSet(clusterName string, options map[string]string) (*clientgo.ClientSet, error) {
+	config, err := ParseManageConfig(options)
+	if err != nil {
+		return nil, err
+	}
+
+	switch config.Type {
+	case apistructs.ManageProxy:
+		restConfig, err := restclient.GetDialerRestConfig(clusterName, config)
+		if err != nil {
+			return nil, err
+		}
+
+		return clientgo.NewClientSet(restConfig)
+	case apistructs.ManageToken, apistructs.ManageCert:
+		restConfig, err := restclient.GetRestConfig(config)
+		if err != nil {
+			return nil, err
+		}
+
+		return clientgo.NewClientSet(restConfig)
+	case apistructs.ManageInet:
+		fallthrough
+	default:
+		return clientgo.New(config.Address)
+	}
 }

@@ -22,11 +22,13 @@ import (
 	"sync"
 
 	"github.com/mohae/deepcopy"
-
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	apiv1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/bundle"
@@ -36,30 +38,18 @@ import (
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/addon"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/addon/daemonset"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/addon/elasticsearch"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/addon/mysql"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/addon/redis"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/clusterinfo"
-	ds "github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/daemonset"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/deployment"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/event"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/ingress"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/instanceinfosync"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8sservice"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/namespace"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/nodelabel"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/persistentvolume"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/persistentvolumeclaim"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/pod"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/resourceinfo"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/secret"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/serviceaccount"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/statefulset"
+	"github.com/erda-project/erda/modules/scheduler/executor/util"
 	"github.com/erda-project/erda/modules/scheduler/instanceinfo"
 	"github.com/erda-project/erda/modules/scheduler/schedulepolicy/cpupolicy"
+	"github.com/erda-project/erda/pkg/clientgo/customclient"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
 	"github.com/erda-project/erda/pkg/dbengine"
 	"github.com/erda-project/erda/pkg/dlock"
-	"github.com/erda-project/erda/pkg/httpclient"
 	"github.com/erda-project/erda/pkg/istioctl"
 	"github.com/erda-project/erda/pkg/istioctl/engines"
 	"github.com/erda-project/erda/pkg/strutil"
@@ -97,14 +87,14 @@ const (
 // EXECUTOR_K8S_K8SFORSERVICE_CPU_SUBSCRIBE_RATIO = 1.0
 // EXECUTOR_K8S_K8SFORSERVICE_CPU_NUM_QUOTA = 0
 func init() {
-	_ = executortypes.Register(kind, func(name executortypes.Name, clustername string, options map[string]string, optionsPlus interface{}) (
+	_ = executortypes.Register(kind, func(name executortypes.Name, clusterName string, options map[string]string, optionsPlus interface{}) (
 		executortypes.Executor, error) {
-		k, err := New(name, clustername, options)
+		k, err := New(name, clusterName, options)
 		if err != nil {
 			return k, err
 		}
 
-		// 用来存储该 executor 的事件结构
+		// store event structs for this executor
 		localStore := &sync.Map{}
 		stopCh := make(chan struct{}, 1)
 		notifier, err := eventboxapi.New("", nil)
@@ -115,30 +105,30 @@ func init() {
 		if err := k.registerEvent(localStore, stopCh, notifier); err != nil {
 			logrus.Errorf("failed to register event sync fn, executor: %s, (%v)", name, err)
 		}
+
 		// Synchronize instance status
-		dbclient := instanceinfo.New(dbengine.MustOpen())
+		dbClient := instanceinfo.New(dbengine.MustOpen())
 		bdl := bundle.New(bundle.WithCMDB())
-		syncer := instanceinfosync.NewSyncer(clustername, k.addr, dbclient, bdl, k.pod, k.sts, k.deploy, k.event)
+		syncer := instanceinfosync.NewSyncer(clusterName, dbClient, bdl, k.k8sClient)
 		if options["IS_EDAS"] == "true" {
 			return k, nil
 		}
 
-		parentctx, cancelSyncInstanceinfo := context.WithCancel(context.Background())
-		k.instanceinfoSyncCancelFunc = cancelSyncInstanceinfo
+		parentCtx, cancelSyncInstanceInfo := context.WithCancel(context.Background())
+		k.instanceinfoSyncCancelFunc = cancelSyncInstanceInfo
 		go func() {
 			for {
 				select {
-				case <-parentctx.Done():
+				case <-parentCtx.Done():
 					return
 				default:
 				}
-				ctx, cancel := context.WithCancel(parentctx)
-				lock, err := dlock.New(strutil.Concat("/instanceinfosync/", clustername), func() { cancel() })
+				ctx, cancel := context.WithCancel(parentCtx)
+				lock, err := dlock.New(strutil.Concat("/instanceinfosync/", clusterName), func() { cancel() })
 				if err := lock.Lock(context.Background()); err != nil {
 					logrus.Errorf("failed to lock: %v", err)
 					continue
 				}
-
 				if err != nil {
 					logrus.Errorf("failed to get dlock: %v", err)
 					// try again
@@ -158,22 +148,11 @@ func init() {
 type Kubernetes struct {
 	name         executortypes.Name
 	clusterName  string
+	manageConfig *apistructs.ManageConfig
 	options      map[string]string
-	addr         string
-	client       *httpclient.HTTPClient
+	k8sClient    *kubernetes.Clientset
+	customClient *customclient.Clientset
 	evCh         chan *eventtypes.StatusEvent
-	deploy       *deployment.Deployment
-	ds           *ds.Daemonset
-	ingress      *ingress.Ingress
-	namespace    *namespace.Namespace
-	service      *k8sservice.Service
-	pvc          *persistentvolumeclaim.PersistentVolumeClaim
-	pv           *persistentvolume.PersistentVolume
-	sts          *statefulset.StatefulSet
-	pod          *pod.Pod
-	secret       *secret.Secret
-	sa           *serviceaccount.ServiceAccount
-	nodeLabel    *nodelabel.NodeLabel
 	ClusterInfo  *clusterinfo.ClusterInfo
 	resourceInfo *resourceinfo.ResourceInfo
 	event        *event.Event
@@ -191,21 +170,20 @@ type Kubernetes struct {
 	cpuNumQuota float64
 
 	// operators
-	elasticsearchoperator addon.AddonOperator
-	redisoperator         addon.AddonOperator
-	mysqloperator         addon.AddonOperator
-	daemonsetoperator     addon.AddonOperator
+	elasticsearchOperator addon.AddonOperator
+	redisOperator         addon.AddonOperator
+	daemonSetOperator     addon.AddonOperator
 
 	// instanceinfoSyncCancelFunc
 	instanceinfoSyncCancelFunc context.CancelFunc
 
-	dbclient *instanceinfo.Client
+	dbClient *instanceinfo.Client
 
 	istioEngine istioctl.IstioEngine
 }
 
 func (k *Kubernetes) GetK8SAddr() string {
-	return k.addr
+	return k.manageConfig.Address
 }
 
 // Kind implements executortypes.Executor interface
@@ -224,7 +202,7 @@ func (k *Kubernetes) CleanUpBeforeDelete() {
 
 // Addr return kubernetes addr
 func (k *Kubernetes) Addr() string {
-	return k.addr
+	return k.manageConfig.Address
 }
 
 func getWorkspaceRatio(options map[string]string, workspace string, t string, value *float64) {
@@ -265,19 +243,9 @@ func getIstioEngine(info apistructs.ClusterInfoData) (istioctl.IstioEngine, erro
 
 // New new kubernetes executor struct
 func New(name executortypes.Name, clusterName string, options map[string]string) (*Kubernetes, error) {
-	addr, ok := options["ADDR"]
-	if !ok {
-		return nil, errors.Errorf("not found k8s address in env variables")
-	}
-
-	if !strings.HasPrefix(addr, "inet://") {
-		if !strings.HasPrefix(addr, "http") && !strings.HasPrefix(addr, "https") {
-			addr = strutil.Concat("http://", addr)
-		}
-	}
-
 	//Get the value of the super-scoring ratio for different environments
-	var memSubscribeRatio,
+	var (
+		memSubscribeRatio,
 		cpuSubscribeRatio,
 		devMemSubscribeRatio,
 		devCpuSubscribeRatio,
@@ -285,6 +253,33 @@ func New(name executortypes.Name, clusterName string, options map[string]string)
 		testCpuSubscribeRatio,
 		stagingMemSubscribeRatio,
 		stagingCpuSubscribeRatio float64
+	)
+
+	k8sClient, err := util.GetClientSet(clusterName, options)
+	if err != nil {
+		return nil, err
+	}
+
+	manageConfig, err := util.ParseManageConfig(options)
+	if err != nil {
+		logrus.Errorf("parese manage config error: %v", err)
+		return nil, err
+	}
+
+	// TODELETE
+	ns, err := k8sClient.K8sClient.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		logrus.Error("[service]client-go connect test------>", err.Error())
+		return nil, err
+	}
+	fmt.Println("[service]client-go connect test------>", len(ns.Items), clusterName)
+
+	np, err := k8sClient.CustomClient.OpenYurtV1alpha1().NodePools().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		logrus.Error("[service]client-go connect test------>", err.Error())
+		return nil, err
+	}
+	fmt.Println("[service]client-go connect test------>", len(np.Items), clusterName)
 
 	getWorkspaceRatio(options, "PROD", "MEM", &memSubscribeRatio)
 	getWorkspaceRatio(options, "PROD", "CPU", &cpuSubscribeRatio)
@@ -303,53 +298,20 @@ func New(name executortypes.Name, clusterName string, options map[string]string)
 		}
 	}
 
-	client := httpclient.New()
-	if _, ok := options["CA_CRT"]; ok {
-		logrus.Infof("k8s executor(%s) addr for https: %v", name, addr)
-		client = httpclient.New(httpclient.WithHttpsCertFromJSON([]byte(options["CLIENT_CRT"]),
-			[]byte(options["CLIENT_KEY"]),
-			[]byte(options["CA_CRT"])))
+	e := event.New(event.WithKubernetesClient(k8sClient.K8sClient))
+	dbClient := instanceinfo.New(dbengine.MustOpen())
 
-		token, ok := options["BEARER_TOKEN"]
-		if !ok {
-			return nil, errors.Errorf("not found k8s bearer token")
-		}
-		// RBAC is enabled by default, and user authentication is required through token
-		client.BearerTokenAuth(token)
-	}
-
-	basicAuth, ok := options["BASICAUTH"]
-	if ok {
-		namePassword := strings.Split(basicAuth, ":")
-		if len(namePassword) == 2 {
-			client.BasicAuth(namePassword[0], namePassword[1])
-		}
-	}
-
-	deploy := deployment.New(deployment.WithCompleteParams(addr, client))
-	ds := ds.New(ds.WithCompleteParams(addr, client))
-	ing := ingress.New(ingress.WithCompleteParams(addr, client))
-	ns := namespace.New(namespace.WithCompleteParams(addr, client))
-	svc := k8sservice.New(k8sservice.WithCompleteParams(addr, client))
-	pvc := persistentvolumeclaim.New(persistentvolumeclaim.WithCompleteParams(addr, client))
-	pv := persistentvolume.New(persistentvolume.WithCompleteParams(addr, client))
-	sts := statefulset.New(statefulset.WithCompleteParams(addr, client))
-	k8spod := pod.New(pod.WithCompleteParams(addr, client))
-	k8ssecret := secret.New(secret.WithCompleteParams(addr, client))
-	sa := serviceaccount.New(serviceaccount.WithCompleteParams(addr, client))
-	nodeLabel := nodelabel.New(addr, client)
-	event := event.New(event.WithCompleteParams(addr, client))
-	dbclient := instanceinfo.New(dbengine.MustOpen())
-
-	clusterInfo, err := clusterinfo.New(clusterName, clusterinfo.WithCompleteParams(addr, client))
+	clusterInfo, err := clusterinfo.New(clusterName, clusterinfo.WithKubernetesClient(k8sClient.K8sClient),
+		clusterinfo.WithCompleteParams(options["ADDR"]))
 	if err != nil {
 		return nil, errors.Errorf("failed to new cluster info, executorName: %s, clusterName: %s, (%v)",
 			name, clusterName, err)
 	}
-	resourceInfo := resourceinfo.New(addr, client)
 
 	// Synchronize cluster info to ETCD (every 10m)
 	go clusterInfo.LoopLoadAndSync(context.Background(), true)
+
+	resourceInfo := resourceinfo.New(k8sClient.K8sClient)
 
 	rawData, err := clusterInfo.Get()
 	if err != nil {
@@ -366,30 +328,19 @@ func New(name executortypes.Name, clusterName string, options map[string]string)
 		return nil, errors.Errorf("failed to get istio engine, executorName:%s, clusterName:%s, err:%v",
 			name, clusterName, err)
 	}
+
 	evCh := make(chan *eventtypes.StatusEvent, 10)
 
 	k := &Kubernetes{
 		name:                     name,
 		clusterName:              clusterName,
 		options:                  options,
-		addr:                     addr,
-		client:                   client,
+		manageConfig:             manageConfig,
+		k8sClient:                k8sClient.K8sClient,
 		evCh:                     evCh,
-		deploy:                   deploy,
-		ds:                       ds,
-		ingress:                  ing,
-		namespace:                ns,
-		service:                  svc,
-		pvc:                      pvc,
-		pv:                       pv,
-		sts:                      sts,
-		pod:                      k8spod,
-		secret:                   k8ssecret,
-		sa:                       sa,
-		nodeLabel:                nodeLabel,
 		ClusterInfo:              clusterInfo,
 		resourceInfo:             resourceInfo,
-		event:                    event,
+		event:                    e,
 		cpuSubscribeRatio:        cpuSubscribeRatio,
 		memSubscribeRatio:        memSubscribeRatio,
 		devCpuSubscribeRatio:     devCpuSubscribeRatio,
@@ -399,22 +350,19 @@ func New(name executortypes.Name, clusterName string, options map[string]string)
 		stagingCpuSubscribeRatio: stagingCpuSubscribeRatio,
 		stagingMemSubscribeRatio: stagingMemSubscribeRatio,
 		cpuNumQuota:              cpuNumQuota,
-		dbclient:                 dbclient,
+		dbClient:                 dbClient,
 		istioEngine:              istioEngine,
 	}
 
-	elasticsearchoperator := elasticsearch.New(k, sts, ns, svc, k, k8ssecret, k, client)
-	k.elasticsearchoperator = elasticsearchoperator
-	redisoperator := redis.New(k, deploy, sts, svc, ns, k, k8ssecret, client)
-	k.redisoperator = redisoperator
-	mysqloperator := mysql.New(k, ns, k8ssecret, pvc, client)
-	k.mysqloperator = mysqloperator
-	daemonsetoperator := daemonset.New(k, ns, k, k, ds, k)
-	k.daemonsetoperator = daemonsetoperator
+	// Init operator
+	k.elasticsearchOperator = elasticsearch.New(k8sClient, k, k)
+	k.redisOperator = redis.New(k)
+	k.daemonSetOperator = daemonset.New(k, k, k)
+
 	return k, nil
 }
 
-// Create implements creating servicegroup based on k8s api
+// Create implements creating serviceGroup based on k8s api
 func (k *Kubernetes) Create(ctx context.Context, specObj interface{}) (interface{}, error) {
 	runtime, err := ValidateRuntime(specObj, "Create")
 	if err != nil {
@@ -469,7 +417,7 @@ func (k *Kubernetes) Destroy(ctx context.Context, specObj interface{}) error {
 	}
 	if runtime.ProjectNamespace == "" {
 		if err := k.destroyRuntime(ns); err != nil {
-			if k8serror.NotFound(err) {
+			if k8serrors.IsNotFound(err) {
 				logrus.Debugf("k8s namespace not found or already deleted, namespace: %s", ns)
 				return nil
 			}
@@ -609,10 +557,9 @@ func (k *Kubernetes) Precheck(ctx context.Context, specObj interface{}) (apistru
 
 func (k *Kubernetes) CapacityInfo() apistructs.CapacityInfoData {
 	r := apistructs.CapacityInfoData{}
-	r.ElasticsearchOperator = k.elasticsearchoperator.IsSupported()
-	r.RedisOperator = k.redisoperator.IsSupported()
-	r.MysqlOperator = k.mysqloperator.IsSupported()
-	r.DaemonsetOperator = k.daemonsetoperator.IsSupported()
+	r.ElasticsearchOperator = k.elasticsearchOperator.IsSupported()
+	r.RedisOperator = k.redisOperator.IsSupported()
+	r.DaemonsetOperator = k.daemonSetOperator.IsSupported()
 	return r
 }
 
@@ -637,19 +584,19 @@ func (*Kubernetes) JobVolumeCreate(ctx context.Context, spec interface{}) (strin
 	return "", fmt.Errorf("not support for kubernetes")
 }
 
-func (k *Kubernetes) KillPod(podname string) error {
-	pods, err := k.dbclient.PodReader().ByCluster(k.clusterName).ByPodName(podname).Do()
+func (k *Kubernetes) KillPod(name string) error {
+	pods, err := k.dbClient.PodReader().ByCluster(k.clusterName).ByPodName(name).Do()
 	if err != nil {
 		return err
 	}
 	if len(pods) == 0 {
-		return fmt.Errorf("cluster(%s),pod:(%s), not found", k.clusterName, podname)
+		return fmt.Errorf("cluster(%s),pod:(%s), not found", k.clusterName, name)
 	}
 	if len(pods) > 1 {
-		return fmt.Errorf("cluster(%s),pod:(%s), find multiple pods", k.clusterName, podname)
+		return fmt.Errorf("cluster(%s),pod:(%s), find multiple pods", k.clusterName, name)
 	}
 	pod := pods[0]
-	return k.killPod(pod.K8sNamespace, podname)
+	return k.killPod(pod.K8sNamespace, name)
 }
 
 // Two interfaces may call this function
@@ -725,11 +672,11 @@ func (k *Kubernetes) tryDelete(namespace, name string) error {
 	}
 	wg.Add(2)
 	go func() {
-		err1 = k.deleteDeployment(namespace, name)
+		err1 = k.k8sClient.AppsV1().Deployments(namespace).Delete(context.Background(), name, metav1.DeleteOptions{})
 		wg.Done()
 	}()
 	go func() {
-		err2 = k.deleteDaemonSet(namespace, name)
+		err2 = k.k8sClient.AppsV1().DaemonSets(namespace).Delete(context.Background(), name, metav1.DeleteOptions{})
 		wg.Done()
 	}()
 	wg.Wait()
@@ -879,14 +826,16 @@ func (k *Kubernetes) updateOneByOne(sg *apistructs.ServiceGroup) error {
 	}
 
 	for _, svcName := range toBeDeleted {
-		if err = k.service.Delete(ns, svcName); err != nil {
+		if err = k.k8sClient.CoreV1().Services(ns).Delete(context.Background(), svcName, metav1.DeleteOptions{}); err != nil {
 			logrus.Errorf("failed to delete k8s service in update interface, namespace: %s, name: %s, (%v)", ns, svcName, err)
 			return err
 		}
 	}
 
 	for _, svc := range k8sServices {
-		deploys, err := k.deploy.List(ns, map[string]string{"app": svc})
+		deploys, err := k.k8sClient.AppsV1().Deployments(ns).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: labels.Set(map[string]string{"app": svc}).String(),
+		})
 		if err != nil {
 			logrus.Errorf("failed to get deploys in ns %s", ns)
 			return err
@@ -899,7 +848,7 @@ func (k *Kubernetes) updateOneByOne(sg *apistructs.ServiceGroup) error {
 			}
 		}
 		if remainCount < 1 {
-			err = k.service.Delete(ns, svc)
+			err = k.k8sClient.CoreV1().Services(ns).Delete(context.Background(), svc, metav1.DeleteOptions{})
 			if err != nil {
 				logrus.Errorf("failed to delete global service %s in ns %s", svc, ns)
 				return err
@@ -942,7 +891,7 @@ func (k *Kubernetes) getStatelessStatus(ctx context.Context, sg *apistructs.Serv
 			// TODO: the state can be chanded to "Error"..
 			status.Status = apistructs.StatusUnknown
 
-			if !k8serror.NotFound(err) {
+			if !k8serrors.IsNotFound(err) {
 				return status, err
 			}
 			notfound, err := k.NotfoundNamespace(ns)
@@ -970,16 +919,19 @@ func (k *Kubernetes) getStatelessStatus(ctx context.Context, sg *apistructs.Serv
 			isReady = false
 			resultStatus.Status = apistructs.StatusProgressing
 			sg.Services[i].Status = apistructs.StatusProgressing
-			podstatuses, err := k.pod.GetNamespacedPodsStatus(sg.Services[i].Namespace)
+			podsStatus, err := k.GetNamespacedPodsStatus(sg.Services[i].Namespace)
+
 			if err != nil {
 				logrus.Errorf("failed to get pod unready reasons, namespace: %v, name: %s, %v",
 					sg.Services[i].Namespace,
 					getDeployName(&sg.Services[i]), err)
 			}
-			if len(podstatuses) != 0 {
-				sg.Services[i].LastMessage = podstatuses[0].Message
-				sg.Services[i].Reason = string(podstatuses[0].Reason)
+
+			if len(podsStatus) != 0 {
+				sg.Services[i].LastMessage = podsStatus[0].Message
+				sg.Services[i].Reason = string(podsStatus[0].Reason)
 			}
+
 			continue
 		}
 
@@ -1038,13 +990,11 @@ func (k *Kubernetes) SetFineGrainedCPU(container *apiv1.Container, extra map[str
 func (k *Kubernetes) whichOperator(operator string) (addon.AddonOperator, error) {
 	switch operator {
 	case "elasticsearch":
-		return k.elasticsearchoperator, nil
+		return k.elasticsearchOperator, nil
 	case "redis":
-		return k.redisoperator, nil
-	case "mysql":
-		return k.mysqloperator, nil
+		return k.redisOperator, nil
 	case "daemonset":
-		return k.daemonsetoperator, nil
+		return k.daemonSetOperator, nil
 	}
 	return nil, fmt.Errorf("not found")
 }
@@ -1055,21 +1005,6 @@ func (k *Kubernetes) CPUOvercommit(limit float64) float64 {
 
 func (k *Kubernetes) MemoryOvercommit(limit int) int {
 	return int(float64(limit) / k.memSubscribeRatio)
-}
-
-func GenTolerations() []apiv1.Toleration {
-	return []apiv1.Toleration{
-		{
-			Key:      "node-role.kubernetes.io/lb",
-			Operator: "Exists",
-			Effect:   "NoSchedule",
-		},
-		{
-			Key:      "node-role.kubernetes.io/master",
-			Operator: "Exists",
-			Effect:   "NoSchedule",
-		},
-	}
 }
 
 func (k *Kubernetes) setProjectNamespaceEnvs(sg *apistructs.ServiceGroup) {

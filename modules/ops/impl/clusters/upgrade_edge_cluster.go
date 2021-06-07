@@ -15,6 +15,7 @@ package clusters
 
 import (
 	"fmt"
+	manager "github.com/erda-project/erda/providers/cluster-manager"
 	"os"
 	"sort"
 	"strconv"
@@ -32,12 +33,13 @@ import (
 )
 
 type Clusters struct {
-	db  *dbclient.DBClient
-	bdl *bundle.Bundle
+	db      *dbclient.DBClient
+	bdl     *bundle.Bundle
+	manager manager.Interface
 }
 
-func New(db *dbclient.DBClient, bdl *bundle.Bundle) *Clusters {
-	return &Clusters{db: db, bdl: bdl}
+func New(db *dbclient.DBClient, bdl *bundle.Bundle, manager manager.Interface) *Clusters {
+	return &Clusters{db: db, bdl: bdl, manager: manager}
 }
 
 // status:

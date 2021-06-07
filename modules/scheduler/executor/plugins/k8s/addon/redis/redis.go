@@ -14,79 +14,62 @@
 package redis
 
 import (
-	"bytes"
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/addon"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8sapi"
 	"github.com/erda-project/erda/modules/scheduler/schedulepolicy/constraintbuilders"
-	"github.com/erda-project/erda/pkg/httpclient"
+	redisfailoverv1 "github.com/erda-project/erda/pkg/clientgo/apis/redisfailover/v1"
+	"github.com/erda-project/erda/pkg/clientgo/customclient"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
 type RedisOperator struct {
-	k8s         addon.K8SUtil
-	deployment  addon.DeploymentUtil
-	statefulset addon.StatefulsetUtil
-	ns          addon.NamespaceUtil
-	service     addon.ServiceUtil
-	overcommit  addon.OvercommitUtil
-	secret      addon.SecretUtil
-	client      *httpclient.HTTPClient
+	k8sClient    *kubernetes.Clientset
+	customClient *customclient.Clientset
+	overcommit   addon.OvercommitUtil
 }
 
-func NewRedisOperator(k8sutil addon.K8SUtil,
-	deploy addon.DeploymentUtil,
-	sts addon.StatefulsetUtil,
-	service addon.ServiceUtil,
-	ns addon.NamespaceUtil,
-	overcommit addon.OvercommitUtil,
-	secret addon.SecretUtil,
-	client *httpclient.HTTPClient) *RedisOperator {
+func NewRedisOperator(overcommit addon.OvercommitUtil) *RedisOperator {
 	return &RedisOperator{
-		k8s:         k8sutil,
-		deployment:  deploy,
-		statefulset: sts,
-		service:     service,
-		ns:          ns,
-		overcommit:  overcommit,
-		secret:      secret,
-		client:      client,
+		overcommit: overcommit,
 	}
 }
 
 func (ro *RedisOperator) IsSupported() bool {
-	resp, err := ro.client.Get(ro.k8s.GetK8SAddr()).
-		Path("/apis/databases.spotahome.com/v1").
-		Do().
-		DiscardBody()
+	_, err := ro.customClient.RedisfailoverV1().RedisFailovers(metav1.NamespaceDefault).List(context.Background(), metav1.ListOptions{
+		Limit: 1,
+	})
+
 	if err != nil {
-		logrus.Errorf("failed to query /apis/databases.spotahome.com/v1, host: %v, err: %v",
-			ro.k8s.GetK8SAddr(), err)
+		logrus.Errorf("failed to query resource redisfailover, err: %v", err)
 		return false
 	}
-	if !resp.IsOK() {
-		return false
-	}
+
 	return true
 }
 
-// Validate 检查
+// Validate
 func (ro *RedisOperator) Validate(sg *apistructs.ServiceGroup) error {
 	operator, ok := sg.Labels["USE_OPERATOR"]
 	if !ok {
 		return fmt.Errorf("[BUG] sg need USE_OPERATOR label")
 	}
+
 	if strutil.ToLower(operator) != svcNameRedis {
 		return fmt.Errorf("[BUG] value of label USE_OPERATOR should be 'redis'")
 	}
+
 	if len(sg.Services) != 2 {
 		return fmt.Errorf("illegal services num: %d", len(sg.Services))
 	}
@@ -116,16 +99,19 @@ func (ro *RedisOperator) Validate(sg *apistructs.ServiceGroup) error {
 }
 
 type redisFailoverAndSecret struct {
-	RedisFailover
+	redisfailoverv1.RedisFailover
 	corev1.Secret
 }
 
 func (ro *RedisOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
+	var (
+		redis        redisfailoverv1.RedisSettings
+		sentinel     redisfailoverv1.SentinelSettings
+		redisService apistructs.Service
+	)
+
 	svc0 := sg.Services[0]
 	svc1 := sg.Services[1]
-	var redis RedisSettings
-	var sentinel SentinelSettings
-	var redisService apistructs.Service
 
 	scheinfo := sg.ScheduleInfo2
 	scheinfo.Stateful = true
@@ -146,7 +132,7 @@ func (ro *RedisOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 		sentinel = convertSentinel(svc1, affinity)
 	}
 
-	rf := RedisFailover{
+	rf := redisfailoverv1.RedisFailover{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "databases.spotahome.com/v1",
 			Kind:       "RedisFailover",
@@ -155,10 +141,10 @@ func (ro *RedisOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 			Name:      sg.ID,
 			Namespace: genK8SNamespace(sg.Type, sg.ID),
 		},
-		Spec: RedisFailoverSpec{
+		Spec: redisfailoverv1.RedisFailoverSpec{
 			Redis:    redis,
 			Sentinel: sentinel,
-			Auth:     AuthSettings{SecretPath: "redis-password"},
+			Auth:     redisfailoverv1.AuthSettings{SecretPath: "redis-password"},
 		},
 	}
 	secret := corev1.Secret{
@@ -179,46 +165,57 @@ func (ro *RedisOperator) Create(k8syml interface{}) error {
 	if !ok {
 		return fmt.Errorf("[BUG] this k8syml should be redisFailoverAndSecret")
 	}
+
 	redis := redisAndSecret.RedisFailover
 	secret := redisAndSecret.Secret
-	if err := ro.ns.Exists(redis.Namespace); err != nil {
-		if err := ro.ns.Create(redis.Namespace, nil); err != nil {
-			return err
-		}
-	}
-	if err := ro.secret.CreateIfNotExist(&secret); err != nil {
+
+	_, err := ro.k8sClient.CoreV1().Namespaces().Create(context.Background(), &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: redis.Namespace,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return err
 	}
-	var b bytes.Buffer
-	resp, err := ro.client.Post(ro.k8s.GetK8SAddr()).
-		Path(fmt.Sprintf("/apis/databases.spotahome.com/v1/namespaces/%s/redisfailovers", redis.Namespace)).
-		JSONBody(redis).
-		Do().
-		Body(&b)
+
+	_, err = ro.k8sClient.CoreV1().Secrets(secret.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	_, err = ro.customClient.RedisfailoverV1().RedisFailovers(redis.Namespace).Create(context.Background(), &redis)
 	if err != nil {
-		return fmt.Errorf("failed to create redisfailover, %s/%s, err: %v", redis.Namespace, redis.Name, err)
+		logrus.Errorf("failed to create redisfailover, %s/%s, err: %v", redis.Namespace, redis.Name, err)
+		return err
 	}
-	if !resp.IsOK() {
-		return fmt.Errorf("failed to create redisfailover, %s/%s, statuscode: %v, body: %v",
-			redis.Namespace, redis.Name, resp.StatusCode(), b.String())
-	}
+
 	return nil
 }
 
 func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.ServiceGroup, error) {
-	deploylist, err := ro.deployment.List(genK8SNamespace(sg.Type, sg.ID), nil)
+	nsName := genK8SNamespace(sg.Type, sg.ID)
+
+	deployList, err := ro.k8sClient.AppsV1().Deployments(nsName).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	stslist, err := ro.statefulset.List(genK8SNamespace(sg.Type, sg.ID))
+
+	stsList, err := ro.k8sClient.AppsV1().StatefulSets(nsName).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	svclist, err := ro.service.List(genK8SNamespace(sg.Type, sg.ID))
+
+	svcList, err := ro.k8sClient.CoreV1().Services(nsName).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
+
 	var redis, sentinel *apistructs.Service
+
 	if sg.Services[0].Name == svcNameRedis {
 		redis = &(sg.Services[0])
 	}
@@ -231,7 +228,12 @@ func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servi
 	if sg.Services[1].Name == svcNameSentinel {
 		sentinel = &(sg.Services[1])
 	}
-	for _, deploy := range deploylist.Items {
+
+	if sentinel == nil || redis == nil {
+		return nil, errors.New("sentinel or redis is nil")
+	}
+
+	for _, deploy := range deployList.Items {
 		for _, cond := range deploy.Status.Conditions {
 			if cond.Type == appsv1.DeploymentAvailable {
 				if cond.Status == corev1.ConditionTrue {
@@ -242,7 +244,7 @@ func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servi
 			}
 		}
 	}
-	for _, sts := range stslist.Items {
+	for _, sts := range stsList.Items {
 		if sts.Spec.Replicas == nil {
 			redis.Status = apistructs.StatusUnknown
 		} else if *sts.Spec.Replicas == sts.Status.ReadyReplicas {
@@ -252,7 +254,7 @@ func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servi
 		}
 	}
 
-	for _, svc := range svclist.Items {
+	for _, svc := range svcList.Items {
 		sentinel.Vip = strutil.Join([]string{svc.Name, svc.Namespace, "svc.cluster.local"}, ".")
 	}
 	if redis.Status == apistructs.StatusHealthy && sentinel.Status == apistructs.StatusHealthy {
@@ -264,28 +266,21 @@ func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servi
 }
 
 func (ro *RedisOperator) Remove(sg *apistructs.ServiceGroup) error {
-	k8snamespace := genK8SNamespace(sg.Type, sg.ID)
-	var b bytes.Buffer
-	resp, err := ro.client.Delete(ro.k8s.GetK8SAddr()).
-		Path(fmt.Sprintf("/apis/databases.spotahome.com/v1/namespaces/%s/redisfailovers/%s", k8snamespace, sg.ID)).
-		JSONBody(k8sapi.DeleteOptions).
-		Do().
-		Body(&b)
+	nsName := genK8SNamespace(sg.Type, sg.ID)
+
+	err := ro.customClient.RedisfailoverV1().RedisFailovers(nsName).Delete(context.Background(), sg.ID, &metav1.DeleteOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to delele redisfailover: %s/%s, err: %v", sg.Type, sg.ID, err)
-	}
-	if !resp.IsOK() {
-		if resp.IsNotfound() {
+		if k8serrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to delete redisfailover: %s/%s, statuscode: %v, body: %v",
-			sg.Type, sg.ID, resp.StatusCode(), b.String())
+		return fmt.Errorf("failed to delele redisfailover: %s/%s, err: %v", sg.Type, sg.ID, err)
 	}
 
-	if err := ro.ns.Delete(k8snamespace); err != nil {
-		logrus.Errorf("failed to delete namespace: %s: %v", k8snamespace, err)
+	if err := ro.k8sClient.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{}); err != nil {
+		logrus.Errorf("failed to delete namespace: %s: %v", nsName, err)
 		return nil
 	}
+
 	return nil
 }
 
@@ -294,8 +289,8 @@ func (ro *RedisOperator) Update(k8syml interface{}) error {
 	return fmt.Errorf("redisoperator not impl Update yet")
 }
 
-func (ro *RedisOperator) convertRedis(svc apistructs.Service, affinity *corev1.NodeAffinity) RedisSettings {
-	settings := RedisSettings{}
+func (ro *RedisOperator) convertRedis(svc apistructs.Service, affinity *corev1.NodeAffinity) redisfailoverv1.RedisSettings {
+	settings := redisfailoverv1.RedisSettings{}
 	settings.Affinity = &corev1.Affinity{NodeAffinity: affinity}
 	settings.Envs = svc.Env
 	settings.Replicas = int32(svc.Scale)
@@ -317,8 +312,8 @@ func (ro *RedisOperator) convertRedis(svc apistructs.Service, affinity *corev1.N
 	return settings
 }
 
-func convertSentinel(svc apistructs.Service, affinity *corev1.NodeAffinity) SentinelSettings {
-	settings := SentinelSettings{}
+func convertSentinel(svc apistructs.Service, affinity *corev1.NodeAffinity) redisfailoverv1.SentinelSettings {
+	settings := redisfailoverv1.SentinelSettings{}
 	settings.Affinity = &corev1.Affinity{NodeAffinity: affinity}
 	settings.Envs = svc.Env
 	settings.Replicas = int32(svc.Scale)

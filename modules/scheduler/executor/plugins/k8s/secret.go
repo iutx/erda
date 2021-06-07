@@ -14,9 +14,11 @@
 package k8s
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"strings"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -31,12 +33,12 @@ import (
 // 2, put this secret into serviceaccount of the namespace
 func (k *Kubernetes) NewImageSecret(namespace string) error {
 	// When the cluster is initialized, a secret to pull the mirror will be created in the default namespace
-	s, err := k.secret.Get("default", AliyunRegistry)
+	s, err := k.k8sClient.CoreV1().Secrets(metav1.NamespaceDefault).Get(context.Background(), AliyunRegistry, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
 
-	mysecret := &apiv1.Secret{
+	secret := &apiv1.Secret{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
 			Kind:       "Secret",
@@ -50,7 +52,8 @@ func (k *Kubernetes) NewImageSecret(namespace string) error {
 		Type:       s.Type,
 	}
 
-	if err := k.secret.Create(mysecret); err != nil {
+	_, err = k.k8sClient.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
 
@@ -63,7 +66,8 @@ func (k *Kubernetes) NewImageSecret(namespace string) error {
 // 3, put this secret into serviceaccount of the namespace
 func (k *Kubernetes) NewRuntimeImageSecret(namespace string, sg *apistructs.ServiceGroup) error {
 	// When the cluster is initialized, a secret to pull the mirror will be created in the default namespace
-	s, err := k.secret.Get("default", AliyunRegistry)
+
+	s, err := k.k8sClient.CoreV1().Secrets(metav1.NamespaceDefault).Get(context.Background(), AliyunRegistry, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -87,7 +91,7 @@ func (k *Kubernetes) NewRuntimeImageSecret(namespace string, sg *apistructs.Serv
 		return err
 	}
 
-	mysecret := &apiv1.Secret{
+	secret := &apiv1.Secret{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
 			Kind:       "Secret",
@@ -100,41 +104,54 @@ func (k *Kubernetes) NewRuntimeImageSecret(namespace string, sg *apistructs.Serv
 		Type: s.Type,
 	}
 
-	if err := k.secret.Create(mysecret); err != nil {
+	_, err = k.k8sClient.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
 
 	return k.updateDefaultServiceAccountForImageSecret(namespace, s.Name)
 }
 
-// CopyErdaSecrets Copy the secret under orignns namespace to dstns
-func (k *Kubernetes) CopyErdaSecrets(originns, dstns string) ([]apiv1.Secret, error) {
-	secrets, err := k.secret.List(originns)
+// CopyErdaSecrets Copy the secret under originNs namespace to dstNs
+func (k *Kubernetes) CopyErdaSecrets(originNs, dstNs string) ([]apiv1.Secret, error) {
+	secrets, err := k.k8sClient.CoreV1().Secrets(originNs).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	result := []apiv1.Secret{}
+
+	result := make([]apiv1.Secret, 0)
 	for _, secret := range secrets.Items {
 		// ignore default token
 		if !strutil.HasPrefixes(secret.Name, "dice-") {
 			continue
 		}
-		dstsecret := &apiv1.Secret{
+
+		dstSecret := &apiv1.Secret{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: "v1",
 				Kind:       "Secret",
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      secret.Name,
-				Namespace: dstns,
+				Namespace: dstNs,
 			},
 			Data:       secret.Data,
 			StringData: secret.StringData,
 			Type:       secret.Type,
 		}
-		if err := k.secret.CreateIfNotExist(dstsecret); err != nil {
-			return nil, err
+
+		_, err = k.k8sClient.CoreV1().Secrets(dstNs).Get(context.Background(), secret.Name, metav1.GetOptions{})
+		if err != nil {
+			if !k8serrors.IsNotFound(err) {
+				return nil, err
+			}
+
+			_, err = k.k8sClient.CoreV1().Secrets(dstNs).Create(context.Background(), dstSecret, metav1.CreateOptions{})
+			if err != nil {
+				return nil, err
+			}
 		}
+
 		result = append(result, secret)
 	}
 	return result, nil

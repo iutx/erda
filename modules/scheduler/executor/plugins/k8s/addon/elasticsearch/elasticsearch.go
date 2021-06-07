@@ -14,71 +14,59 @@
 package elasticsearch
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/erda-project/erda/pkg/clientgo"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 	apiv1 "k8s.io/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/addon"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8sapi"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
 	"github.com/erda-project/erda/modules/scheduler/schedulepolicy/constraintbuilders"
-	"github.com/erda-project/erda/pkg/httpclient"
+	commonv1 "github.com/erda-project/erda/pkg/clientgo/apis/elasticsearch/common/v1"
+	v1 "github.com/erda-project/erda/pkg/clientgo/apis/elasticsearch/v1"
+	"github.com/erda-project/erda/pkg/clientgo/customclient"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
-type ElasticsearchOperator struct {
-	k8s         addon.K8SUtil
-	statefulset addon.StatefulsetUtil
-	ns          addon.NamespaceUtil
-	service     addon.ServiceUtil
-	overcommit  addon.OvercommitUtil
-	secret      addon.SecretUtil
-	imageSecret addon.ImageSecretUtil
-	client      *httpclient.HTTPClient
+type ElasticsearchAndSecret struct {
+	v1.Elasticsearch
+	corev1.Secret
 }
 
-func New(k8s addon.K8SUtil,
-	sts addon.StatefulsetUtil,
-	ns addon.NamespaceUtil,
-	service addon.ServiceUtil,
-	overcommit addon.OvercommitUtil,
-	secret addon.SecretUtil,
-	imageSecret addon.ImageSecretUtil,
-	client *httpclient.HTTPClient) *ElasticsearchOperator {
+type ElasticsearchOperator struct {
+	k8sClient    *kubernetes.Clientset
+	customClient *customclient.Clientset
+	overcommit   addon.OvercommitUtil
+	imageSecret  addon.ImageSecretUtil
+}
+
+func New(clientSet *clientgo.ClientSet, overcommit addon.OvercommitUtil, imageSecret addon.ImageSecretUtil) *ElasticsearchOperator {
 	return &ElasticsearchOperator{
-		k8s:         k8s,
-		statefulset: sts,
-		ns:          ns,
-		service:     service,
-		overcommit:  overcommit,
-		secret:      secret,
-		imageSecret: imageSecret,
-		client:      client,
+		k8sClient:    clientSet.K8sClient,
+		customClient: clientSet.CustomClient,
+		overcommit:   overcommit,
+		imageSecret:  imageSecret,
 	}
 }
 
 // IsSupported Determine whether to support  elasticseatch operator
 func (eo *ElasticsearchOperator) IsSupported() bool {
-	resp, err := eo.client.Get(eo.k8s.GetK8SAddr()).
-		Path("/apis/elasticsearch.k8s.elastic.co/v1").
-		Do().
-		DiscardBody()
+	_, err := eo.customClient.ElasticsearchV1().Elasticsearches(metav1.NamespaceDefault).List(context.Background(),
+		metav1.ListOptions{Limit: 1})
 	if err != nil {
-		logrus.Errorf("failed to query /apis/elasticsearch.k8s.elastic.co/v1, host: %v, err: %v",
-			eo.k8s.GetK8SAddr(), err)
+		logrus.Errorf("failed to query resource elasticsearch, err: %v", err)
 		return false
 	}
-	if !resp.IsOK() {
-		return false
-	}
+
 	return true
 }
 
@@ -116,7 +104,7 @@ func (eo *ElasticsearchOperator) Convert(sg *apistructs.ServiceGroup) interface{
 	affinity := constraintbuilders.K8S(&scheinfo, nil, nil, nil).Affinity.NodeAffinity
 
 	nodeSets := eo.NodeSetsConvert(svc0, scname, affinity)
-	es := Elasticsearch{
+	es := v1.Elasticsearch{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Elasticsearch",
 			APIVersion: "elasticsearch.k8s.elastic.co/v1",
@@ -125,17 +113,17 @@ func (eo *ElasticsearchOperator) Convert(sg *apistructs.ServiceGroup) interface{
 			Name:      sg.ID,
 			Namespace: genK8SNamespace(sg.Type, sg.ID),
 		},
-		Spec: ElasticsearchSpec{
-			Http: HttpSettings{
-				Tls: TlsSettings{
-					SelfSignedCertificate: SelfSignedCertificateSettings{
+		Spec: v1.ElasticsearchSpec{
+			HTTP: commonv1.HTTPConfig{
+				TLS: commonv1.TLSOptions{
+					SelfSignedCertificate: &commonv1.SelfSignedCertificate{
 						Disabled: true,
 					},
 				},
 			},
 			Version: sg.Labels["VERSION"],
 			Image:   svc0.Image,
-			NodeSets: []NodeSetsSettings{
+			NodeSets: []v1.NodeSet{
 				nodeSets,
 			},
 		},
@@ -159,50 +147,60 @@ func (eo *ElasticsearchOperator) Create(k8syml interface{}) error {
 	if !ok {
 		return fmt.Errorf("[BUG] this k8syml should be elasticsearchAndSecret")
 	}
+
 	elasticsearch := elasticsearchAndSecret.Elasticsearch
 	secret := elasticsearchAndSecret.Secret
-	if err := eo.ns.Exists(elasticsearch.Namespace); err != nil {
-		if err := eo.ns.Create(elasticsearch.Namespace, nil); err != nil {
-			return err
-		}
-	}
-	if err := eo.secret.CreateIfNotExist(&secret); err != nil {
+
+	_, err := eo.k8sClient.CoreV1().Namespaces().Create(context.Background(), &apiv1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: elasticsearch.Namespace,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return err
 	}
-	//logrus.Info("es operator, start to create image secret, sepc:%+v", elasticsearch)
+
+	_, err = eo.k8sClient.CoreV1().Secrets(secret.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	logrus.Debugf("es operator, start to create image secret, sepc:%+v", elasticsearch)
 	if err := eo.imageSecret.NewImageSecret(elasticsearch.Namespace); err != nil {
 		return err
 	}
-	var b bytes.Buffer
-	resp, err := eo.client.Post(eo.k8s.GetK8SAddr()).
-		Path(fmt.Sprintf("/apis/elasticsearch.k8s.elastic.co/v1/namespaces/%s/elasticsearches", elasticsearch.Namespace)).
-		JSONBody(elasticsearch).
-		Do().
-		Body(&b)
+
+	_, err = eo.customClient.ElasticsearchV1().Elasticsearches(elasticsearch.Namespace).Create(context.Background(),
+		&elasticsearch, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create elasticsearch, %s/%s, err: %v", elasticsearch.Namespace, elasticsearch.Name, err)
 	}
-	if !resp.IsOK() {
-		return fmt.Errorf("failed to create elasticsearch, %s/%s, statuscode: %v, body: %v",
-			elasticsearch.Namespace, elasticsearch.Name, resp.StatusCode(), b.String())
-	}
+
 	return nil
 }
 
 func (eo *ElasticsearchOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.ServiceGroup, error) {
-	stslist, err := eo.statefulset.List(genK8SNamespace(sg.Type, sg.ID))
+	nsName := genK8SNamespace(sg.Type, sg.ID)
+
+	stsList, err := eo.k8sClient.AppsV1().StatefulSets(nsName).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	svclist, err := eo.service.List(genK8SNamespace(sg.Type, sg.ID))
+
+	svcList, err := eo.k8sClient.CoreV1().Services(nsName).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
+
 	var elasticsearch *apistructs.Service
 	if sg.Services[0].Name == "elasticsearch" {
 		elasticsearch = &(sg.Services[0])
 	}
-	for _, sts := range stslist.Items {
+	for _, sts := range stsList.Items {
 		if sts.Spec.Replicas == nil {
 			elasticsearch.Status = apistructs.StatusUnknown
 		} else if *sts.Spec.Replicas == sts.Status.ReadyReplicas {
@@ -212,7 +210,7 @@ func (eo *ElasticsearchOperator) Inspect(sg *apistructs.ServiceGroup) (*apistruc
 		}
 	}
 
-	for _, svc := range svclist.Items {
+	for _, svc := range svcList.Items {
 		if strings.Contains(svc.Name, "es-http") {
 			elasticsearch.Vip = strutil.Join([]string{svc.Name, svc.Namespace, "svc.cluster.local"}, ".")
 		}
@@ -227,27 +225,17 @@ func (eo *ElasticsearchOperator) Inspect(sg *apistructs.ServiceGroup) (*apistruc
 }
 
 func (eo *ElasticsearchOperator) Remove(sg *apistructs.ServiceGroup) error {
-	k8snamespace := genK8SNamespace(sg.Type, sg.ID)
-	var b bytes.Buffer
-	resp, err := eo.client.Delete(eo.k8s.GetK8SAddr()).
-		Path(fmt.Sprintf("/apis/elasticsearch.k8s.elastic.co/v1/namespaces/%s/elasticsearches/%s", k8snamespace, sg.ID)).
-		JSONBody(k8sapi.DeleteOptions).
-		Do().
-		Body(&b)
-	if err != nil {
-		return fmt.Errorf("failed to delele elasticsearch: %s/%s, err: %v", sg.Type, sg.ID, err)
-	}
-	if !resp.IsOK() {
-		if resp.IsNotfound() {
-			return nil
-		}
-		return fmt.Errorf("failed to delete elasticsearch: %s/%s, statuscode: %v, body: %v",
-			sg.Type, sg.ID, resp.StatusCode(), b.String())
+	nsName := genK8SNamespace(sg.Type, sg.ID)
+
+	if err := eo.customClient.ElasticsearchV1().Elasticsearches(nsName).Delete(context.Background(), sg.ID,
+		metav1.DeleteOptions{}); err != nil {
+		logrus.Errorf("failed to delete elasticsearch: %s: %v", nsName, err)
+		return err
 	}
 
-	if err := eo.ns.Delete(k8snamespace); err != nil {
-		logrus.Errorf("failed to delete namespace: %s: %v", k8snamespace, err)
-		return fmt.Errorf("failed to delete namespace: %s: %v", k8snamespace, err)
+	if err := eo.k8sClient.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{}); err != nil {
+		logrus.Errorf("failed to delete namespace: %s: %v", nsName, err)
+		return fmt.Errorf("failed to delete namespace: %s: %v", nsName, err)
 	}
 	return nil
 }
@@ -259,12 +247,17 @@ func (eo *ElasticsearchOperator) Update(k8syml interface{}) error {
 	if !ok {
 		return fmt.Errorf("[BUG] this k8syml should be elasticsearchAndSecret")
 	}
+
 	elasticsearch := elasticsearchAndSecret.Elasticsearch
 	secret := elasticsearchAndSecret.Secret
-	if err := eo.ns.Exists(elasticsearch.Namespace); err != nil {
+
+	_, err := eo.k8sClient.CoreV1().Namespaces().Get(context.Background(), elasticsearch.Namespace, metav1.GetOptions{})
+	if err != nil {
 		return err
 	}
-	if err := eo.secret.CreateIfNotExist(&secret); err != nil {
+
+	_, err = eo.k8sClient.CoreV1().Secrets(secret.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return err
 	}
 
@@ -279,19 +272,12 @@ func (eo *ElasticsearchOperator) Update(k8syml interface{}) error {
 	// fix error: Resource was created with older version of operator, will not take action
 	elasticsearch.ObjectMeta.Annotations = es.ObjectMeta.Annotations
 
-	var b bytes.Buffer
-	resp, err := eo.client.Put(eo.k8s.GetK8SAddr()).
-		Path(fmt.Sprintf("/apis/elasticsearch.k8s.elastic.co/v1/namespaces/%s/elasticsearches/%s", elasticsearch.Namespace, elasticsearch.Name)).
-		JSONBody(elasticsearch).
-		Do().
-		Body(&b)
-	if err != nil {
-		return fmt.Errorf("failed to update elasticsearchs, %s/%s, err: %v", elasticsearch.Namespace, elasticsearch.Name, err)
+	if _, err = eo.customClient.ElasticsearchV1().Elasticsearches(elasticsearch.Namespace).Update(context.Background(),
+		&elasticsearch, metav1.UpdateOptions{}); err != nil {
+		logrus.Errorf("failed to update elasticsearchs, %s/%s, err: %v", elasticsearch.Namespace, elasticsearch.Name, err)
+		return err
 	}
-	if !resp.IsOK() {
-		return fmt.Errorf("failed to update elasticsearchs, %s/%s, statuscode: %v, body: %v",
-			elasticsearch.Namespace, elasticsearch.Name, resp.StatusCode(), b.String())
-	}
+
 	return nil
 }
 
@@ -299,16 +285,18 @@ func genK8SNamespace(namespace, name string) string {
 	return strutil.Concat(namespace, "--", name)
 }
 
-func (eo *ElasticsearchOperator) NodeSetsConvert(svc apistructs.Service, scname string, affinity *corev1.NodeAffinity) NodeSetsSettings {
+func (eo *ElasticsearchOperator) NodeSetsConvert(svc apistructs.Service, scname string, affinity *corev1.NodeAffinity) v1.NodeSet {
 	config, _ := convertJsontToMap(svc.Env["config"])
-	nodeSets := NodeSetsSettings{
-		Name:   "addon",
-		Count:  svc.Scale,
-		Config: config,
-		PodTemplate: PodTemplateSettings{
-			Spec: PodSpecSettings{
+	nodeSets := v1.NodeSet{
+		Name:  "addon",
+		Count: int32(svc.Scale),
+		Config: &commonv1.Config{
+			Data: config,
+		},
+		PodTemplate: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
 				Affinity: &corev1.Affinity{NodeAffinity: affinity},
-				Containers: []ContainersSettings{
+				Containers: []corev1.Container{
 					{
 						Name: "elasticsearch",
 						Env:  envs(svc.Env),
@@ -330,19 +318,19 @@ func (eo *ElasticsearchOperator) NodeSetsConvert(svc apistructs.Service, scname 
 				},
 			},
 		},
-		VolumeClaimTemplates: []VolumeClaimSettings{
+		VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 			{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "elasticsearch-data",
 				},
-				Spec: VolumeClaimSpecSettings{
-					AccessModes: []string{"ReadWriteOnce"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{"ReadWriteOnce"},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							"storage": resource.MustParse("10Gi"),
 						},
 					},
-					StorageClassName: scname,
+					StorageClassName: &scname,
 				},
 			},
 		},
@@ -390,8 +378,8 @@ func convertMiToMB(mem float64) float64 {
 }
 
 // convertJsontToMap Convert json to map
-func convertJsontToMap(str string) (map[string]string, error) {
-	var tempMap map[string]string
+func convertJsontToMap(str string) (map[string]interface{}, error) {
+	var tempMap map[string]interface{}
 	if str == "" {
 		return tempMap, nil
 	}
@@ -403,30 +391,12 @@ func convertJsontToMap(str string) (map[string]string, error) {
 }
 
 // Get get elasticsearchs resource information
-func (eo *ElasticsearchOperator) Get(namespace, name string) (*Elasticsearch, error) {
-	var b bytes.Buffer
-
-	resp, err := eo.client.Get(eo.k8s.GetK8SAddr()).
-		Path(fmt.Sprintf("/apis/elasticsearch.k8s.elastic.co/v1/namespaces/%s/elasticsearches/%s", namespace, name)).
-		Do().
-		Body(&b)
+func (eo *ElasticsearchOperator) Get(namespace, name string) (*v1.Elasticsearch, error) {
+	es, err := eo.customClient.ElasticsearchV1().Elasticsearches(namespace).Get(context.Background(),
+		name, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get elasticsearchs info: %s/%s, err: %v", namespace, name, err)
+		return nil, fmt.Errorf("failed to get elasticsearchs: %s/%s, err: %v", namespace, name, err)
 	}
 
-	if !resp.IsOK() {
-		if resp.IsNotfound() {
-			return nil, fmt.Errorf("failed to get elasticsearchs info: %s/%s, err: %v", namespace, name, k8serror.ErrNotFound)
-		}
-
-		return nil, fmt.Errorf("failed to get elasticsearchs info: %s/%s, statusCode: %v, body: %v",
-			namespace, name, resp.StatusCode(), b.String())
-	}
-
-	elasticsearch := &Elasticsearch{}
-	if err = json.NewDecoder(&b).Decode(elasticsearch); err != nil {
-		return nil, fmt.Errorf("failed to get elasticsearchs info: %s/%s, err: %v", namespace, name, err)
-	}
-
-	return elasticsearch, nil
+	return es, nil
 }

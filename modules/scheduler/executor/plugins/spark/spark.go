@@ -43,7 +43,7 @@ type Spark struct {
 }
 
 func init() {
-	executortypes.Register(kind, func(name executortypes.Name, clustername string, options map[string]string, optionsPlus interface{}) (executortypes.Executor, error) {
+	executortypes.Register(kind, func(name executortypes.Name, clusterName string, options map[string]string, optionsPlus interface{}) (executortypes.Executor, error) {
 		addr, ok := options["ADDR"]
 		if !ok {
 			return nil, errors.Errorf("not found spark address in env variables")
@@ -309,10 +309,10 @@ func constructSparkConstraints(r *apistructs.ScheduleInfo) string {
 	return constrains[:last]
 }
 
-func (m *Spark) SetNodeLabels(setting executortypes.NodeLabelSetting, hosts []string, labels map[string]string) error {
+func (s *Spark) SetNodeLabels(setting executortypes.NodeLabelSetting, hosts []string, labels map[string]string) error {
 	return errors.New("SetNodeLabels not implemented in Spark")
 }
-func (m *Spark) ResourceInfo(brief bool) (apistructs.ClusterResourceInfoData, error) {
+func (s *Spark) ResourceInfo(brief bool) (apistructs.ClusterResourceInfoData, error) {
 	return apistructs.ClusterResourceInfoData{}, fmt.Errorf("resourceinfo not support for spark")
 }
 func (*Spark) CleanUpBeforeDelete() {}

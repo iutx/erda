@@ -14,13 +14,20 @@
 package instanceinfosync
 
 import (
+	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	wathchtool "k8s.io/client-go/tools/watch"
 
 	"github.com/erda-project/erda/modules/scheduler/instanceinfo"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
 )
 
 // updateStatelessServiceDeploymentService Update stateless-service type deployment to db
@@ -286,4 +293,69 @@ func updateDeploymentOnWatch(db *instanceinfo.Client) (func(*appsv1.Deployment),
 	}
 
 	return addOrUpdateFunc, deleteFunc
+}
+
+// WatchDeployInAllNamespace watch deployment in all namespace expect fro kube-system
+func WatchDeployInAllNamespace(ctx context.Context, client *kubernetes.Clientset, addFunc, updateFunc, deleteFunc func(*appsv1.Deployment)) error {
+	curDeployList, err := client.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{Limit: 10})
+	if err != nil {
+		logrus.Errorf("list deployment (limit: 10) error: %v", err)
+		return err
+	}
+
+	retryWatcher, err := wathchtool.NewRetryWatcher(curDeployList.GetResourceVersion(), &cache.ListWatch{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.FieldSelector = "metadata.namespace!=kube-system"
+			return client.AppsV1().Deployments(metav1.NamespaceAll).Watch(ctx, options)
+		},
+	})
+
+	if err != nil {
+		logrus.Errorf("watch deployment expand kube-system namespace error: %v", err)
+		return err
+	}
+
+	defer func() {
+		retryWatcher.Stop()
+		logrus.Info("watch appV1.deployment resource done")
+		retryWatcher.Done()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case res, ok := <-retryWatcher.ResultChan():
+			if !ok {
+				logrus.Error("watch appV1.deployment resource closed unexpectedly")
+				break
+			}
+
+			if res.Object == nil {
+				continue
+			}
+
+			deploy := appsv1.Deployment{}
+			byteDeploy, err := json.Marshal(res.Object)
+			if err != nil {
+				logrus.Errorf("failed to marshal event obj, err: %v", err)
+				continue
+			}
+			if err = json.Unmarshal(byteDeploy, &deploy); err != nil {
+				logrus.Errorf("failed to unmarshal event obj to deploy obj, err: %v", err)
+				continue
+			}
+
+			switch res.Type {
+			case watch.Added:
+				addFunc(&deploy)
+			case watch.Modified:
+				updateFunc(&deploy)
+			case watch.Deleted:
+				deleteFunc(&deploy)
+			case watch.Error, watch.Bookmark:
+				logrus.Infof("ignore event: %v, %v", watch.Error, watch.Bookmark)
+			}
+		}
+	}
 }

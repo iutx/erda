@@ -15,6 +15,7 @@ package k8s
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -34,8 +35,14 @@ import (
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
+const (
+	EnvironmentDev     = "DEV"
+	EnvironmentTest    = "TEST"
+	EnvironmentStaging = "STAGING"
+)
+
 func (k *Kubernetes) createStatefulSet(info StatefulsetInfo) error {
-	statefulName := statefulsetName(info.sg)
+	statefulName := getStatefulSetName(info.sg)
 
 	set := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{
@@ -118,13 +125,13 @@ func (k *Kubernetes) createStatefulSet(info StatefulsetInfo) error {
 	cpuSubscribeRatio := k.cpuSubscribeRatio
 	memSubscribeRatio := k.memSubscribeRatio
 	switch strutil.ToUpper(service.Env["DICE_WORKSPACE"]) {
-	case "DEV":
+	case EnvironmentDev:
 		cpuSubscribeRatio = k.devCpuSubscribeRatio
 		memSubscribeRatio = k.devMemSubscribeRatio
-	case "TEST":
+	case EnvironmentTest:
 		cpuSubscribeRatio = k.testCpuSubscribeRatio
 		memSubscribeRatio = k.testMemSubscribeRatio
-	case "STAGING":
+	case EnvironmentStaging:
 		cpuSubscribeRatio = k.stagingCpuSubscribeRatio
 		memSubscribeRatio = k.stagingMemSubscribeRatio
 	}
@@ -136,11 +143,17 @@ func (k *Kubernetes) createStatefulSet(info StatefulsetInfo) error {
 	if err := k.SetOverCommitMem(container, memSubscribeRatio); err != nil {
 		return err
 	}
-	// Set the statefulset environment variable
+	// Set the statefulSet environment variable
 	setEnv(container, info.envs, info.sg, info.namespace)
 
 	set.Spec.Template.Spec.Containers = []apiv1.Container{*container}
-	return k.sts.Create(set)
+
+	_, err := k.k8sClient.AppsV1().StatefulSets(set.Namespace).Create(context.Background(), set, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (k *Kubernetes) setBind(set *appsv1.StatefulSet, container *apiv1.Container, service *apistructs.Service) error {
@@ -225,51 +238,6 @@ func (k *Kubernetes) requestLocalVolume(set *appsv1.StatefulSet, container *apiv
 			MountPath: bind.ContainerPath,
 			ReadOnly:  bind.ReadOnly,
 		})
-}
-
-// new volume interface
-func configNewVolume(set *appsv1.StatefulSet, container *apiv1.Container, service *apistructs.Service) {
-	if len(service.Volumes) == 0 {
-		return
-	}
-	// The volume of statefulset uses local disk or nas network disk
-	// The local disk is simulated by hostPath, under the premise that the instances of statefulset are scheduled to different instances
-	for _, vol := range service.Volumes {
-		nas := 0
-		local := 0
-		var (
-			name string
-			path string
-		)
-		switch vol.VolumeType {
-		case apistructs.LocalVolume:
-			name = strutil.Concat("localvolume-", strconv.Itoa(local))
-			path = strutil.Concat("/mnt/dice/volumes/", vol.VolumePath)
-			local++
-		case apistructs.NasVolume:
-			name = strutil.Concat("nas-", strconv.Itoa(nas))
-			path = vol.VolumePath
-			nas++
-		}
-
-		container.VolumeMounts = []apiv1.VolumeMount{
-			{
-				Name:      name,
-				MountPath: vol.ContainerPath,
-			},
-		}
-
-		set.Spec.Template.Spec.Volumes = append(set.Spec.Template.Spec.Volumes,
-			apiv1.Volume{
-				Name: name,
-				VolumeSource: apiv1.VolumeSource{
-					HostPath: &apiv1.HostPathVolumeSource{
-						Path: path,
-					},
-				},
-			},
-		)
-	}
 }
 
 func setEnv(container *apiv1.Container, allEnv map[string]string, sg *apistructs.ServiceGroup, ns string) {
@@ -392,8 +360,8 @@ func convertStatus(status apiv1.PodStatus) apistructs.StatusCode {
 	return apistructs.StatusProgressing
 }
 
-// statefulset The name is defined as set by the user id
-func statefulsetName(sg *apistructs.ServiceGroup) string {
+// getStatefulSetName The name is defined as set by the user id
+func getStatefulSetName(sg *apistructs.ServiceGroup) string {
 	statefulName, ok := getGroupID(&sg.Services[0])
 	if !ok {
 		logrus.Errorf("failed to get groupID from service labels, name: %s", sg.ID)

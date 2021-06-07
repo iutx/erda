@@ -14,6 +14,7 @@
 package k8s
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/pkg/errors"
@@ -31,23 +32,29 @@ import (
 )
 
 func (k *Kubernetes) createDaemonSet(service *apistructs.Service, sg *apistructs.ServiceGroup) error {
-	daemonset, err := k.newDaemonSet(service, sg)
+	ds, err := k.newDaemonSet(service, sg)
 	if err != nil {
 		return errors.Errorf("failed to generate daemonset struct, name: %s, (%v)", service.Name, err)
 	}
 
-	return k.ds.Create(daemonset)
+	if _, err = k.k8sClient.AppsV1().DaemonSets(ds.Namespace).Create(context.Background(), ds, metav1.CreateOptions{}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (k *Kubernetes) getDaemonSetStatus(service *apistructs.Service) (apistructs.StatusDesc, error) {
 	var statusDesc apistructs.StatusDesc
+
 	dsName := getDeployName(service)
-	daemonSet, err := k.getDaemonSet(service.Namespace, dsName)
+
+	ds, err := k.k8sClient.AppsV1().DaemonSets(service.Namespace).Get(context.Background(), dsName, metav1.GetOptions{})
 	if err != nil {
 		return statusDesc, err
 	}
-	status := daemonSet.Status
 
+	status := ds.Status
 	statusDesc.Status = apistructs.StatusUnknown
 
 	if status.NumberAvailable == status.DesiredNumberScheduled {
@@ -59,16 +66,12 @@ func (k *Kubernetes) getDaemonSetStatus(service *apistructs.Service) (apistructs
 	return statusDesc, nil
 }
 
-func (k *Kubernetes) deleteDaemonSet(namespace, name string) error {
-	return k.ds.Delete(namespace, name)
-}
-
 func (k *Kubernetes) updateDaemonSet(ds *appsv1.DaemonSet) error {
-	return k.ds.Update(ds)
-}
+	if _, err := k.k8sClient.AppsV1().DaemonSets(ds.Namespace).Update(context.Background(), ds, metav1.UpdateOptions{}); err != nil {
+		return err
+	}
 
-func (k *Kubernetes) getDaemonSet(namespace, name string) (*appsv1.DaemonSet, error) {
-	return k.ds.Get(namespace, name)
+	return nil
 }
 
 func (k *Kubernetes) newDaemonSet(service *apistructs.Service, sg *apistructs.ServiceGroup) (*appsv1.DaemonSet, error) {
@@ -77,7 +80,7 @@ func (k *Kubernetes) newDaemonSet(service *apistructs.Service, sg *apistructs.Se
 	if _, ok := sg.Labels[EnableServiceLinks]; ok {
 		enableServiceLinks = true
 	}
-	daemonset := &appsv1.DaemonSet{
+	ds := &appsv1.DaemonSet{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "DaemonSet",
 			APIVersion: "apps/v1",
@@ -112,12 +115,12 @@ func (k *Kubernetes) newDaemonSet(service *apistructs.Service, sg *apistructs.Se
 	if v := k.options["FORCE_BLUE_GREEN_DEPLOY"]; v != "true" &&
 		(strutil.ToUpper(service.Env["DICE_WORKSPACE"]) == apistructs.DevWorkspace.String() ||
 			strutil.ToUpper(service.Env["DICE_WORKSPACE"]) == apistructs.TestWorkspace.String()) {
-		daemonset.Spec.UpdateStrategy = appsv1.DaemonSetUpdateStrategy{Type: appsv1.RollingUpdateDaemonSetStrategyType}
+		ds.Spec.UpdateStrategy = appsv1.DaemonSetUpdateStrategy{Type: appsv1.RollingUpdateDaemonSetStrategyType}
 	}
 
 	affinity := constraintbuilders.K8S(&sg.ScheduleInfo2, service, []constraints.PodLabelsForAffinity{
 		{PodLabels: map[string]string{"app": deployName}}}, k).Affinity
-	daemonset.Spec.Template.Spec.Affinity = &affinity
+	ds.Spec.Template.Spec.Affinity = &affinity
 
 	cpu := fmt.Sprintf("%.fm", service.Resources.Cpu*1000)
 	memory := fmt.Sprintf("%.fMi", service.Resources.Mem)
@@ -166,21 +169,21 @@ func (k *Kubernetes) newDaemonSet(service *apistructs.Service, sg *apistructs.Se
 
 	containers := []corev1.Container{container}
 	containers = append(containers, sidecars...)
-	daemonset.Spec.Template.Spec.Containers = containers
+	ds.Spec.Template.Spec.Containers = containers
 	if len(initcontainers) > 0 {
-		daemonset.Spec.Template.Spec.InitContainers = initcontainers
+		ds.Spec.Template.Spec.InitContainers = initcontainers
 	}
 
-	daemonset.Spec.Selector.MatchLabels[LabelServiceGroupID] = service.Env[KeyServiceGroupID]
-	daemonset.Spec.Template.Labels[LabelServiceGroupID] = service.Env[KeyServiceGroupID]
-	daemonset.Labels[LabelServiceGroupID] = service.Env[KeyServiceGroupID]
-	daemonset.Labels["app"] = service.Name
-	daemonset.Spec.Template.Labels["app"] = service.Name
+	ds.Spec.Selector.MatchLabels[LabelServiceGroupID] = service.Env[KeyServiceGroupID]
+	ds.Spec.Template.Labels[LabelServiceGroupID] = service.Env[KeyServiceGroupID]
+	ds.Labels[LabelServiceGroupID] = service.Env[KeyServiceGroupID]
+	ds.Labels["app"] = service.Name
+	ds.Spec.Template.Labels["app"] = service.Name
 
-	if daemonset.Spec.Template.Annotations == nil {
-		daemonset.Spec.Template.Annotations = make(map[string]string)
+	if ds.Spec.Template.Annotations == nil {
+		ds.Spec.Template.Annotations = make(map[string]string)
 	}
-	podAnnotations(service, daemonset.Spec.Template.Annotations)
+	podAnnotations(service, ds.Spec.Template.Annotations)
 
 	// According to the current setting, there is only one user container in a pod
 	if service.Cmd != "" {
@@ -190,7 +193,7 @@ func (k *Kubernetes) newDaemonSet(service *apistructs.Service, sg *apistructs.Se
 		}
 	}
 
-	SetHealthCheck(&daemonset.Spec.Template.Spec.Containers[0], service)
+	SetHealthCheck(&ds.Spec.Template.Spec.Containers[0], service)
 
 	if err := k.AddContainersEnv(containers, service, sg); err != nil {
 		return nil, err
@@ -209,10 +212,10 @@ func (k *Kubernetes) newDaemonSet(service *apistructs.Service, sg *apistructs.Se
 		secretvolmounts = append(secretvolmounts, volmount)
 	}
 
-	k.AddPodMountVolume(service, &daemonset.Spec.Template.Spec, secretvolmounts, secretvolumes)
-	k.AddSpotEmptyDir(&daemonset.Spec.Template.Spec)
+	k.AddPodMountVolume(service, &ds.Spec.Template.Spec, secretvolmounts, secretvolumes)
+	k.AddSpotEmptyDir(&ds.Spec.Template.Spec)
 
-	logrus.Debugf("show k8s daemonset, name: %s, daemonset: %+v", deployName, daemonset)
+	logrus.Debugf("show k8s daemonset, name: %s, daemonset: %+v", deployName, ds)
 
-	return daemonset, nil
+	return ds, nil
 }

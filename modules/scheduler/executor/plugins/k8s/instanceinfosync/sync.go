@@ -19,11 +19,13 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/bundle"
 	"github.com/erda-project/erda/modules/scheduler/instanceinfo"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
+	"github.com/erda-project/erda/pkg/strutil"
 )
 
 //Synchronization strategy:
@@ -31,48 +33,25 @@ import (
 // 1. watch deployment, statefulset, pod
 // TODO: 2. watch event for more detail messages
 
-type deploymentUtils interface {
-	// watch deployment in all namespace, use ctx to cancel
-	WatchAllNamespace(ctx context.Context, add, update, delete func(*appsv1.Deployment)) error
-	// list deployments with limit
-	// return deployment-list, continue, error
-	// if returned continue = nil, means that this is the last part of the list
-	LimitedListAllNamespace(limit int, cont *string) (*appsv1.DeploymentList, *string, error)
-}
-type podUtils interface {
-	// watch pod in all namespace, use ctx to cancel
-	WatchAllNamespace(ctx context.Context, add, update, delete func(*corev1.Pod)) error
-	ListAllNamespace(fieldSelectors []string) (*corev1.PodList, error)
-	Get(namespace, name string) (*corev1.Pod, error)
-}
-type statefulSetUtils interface {
-	// watch sts in all namespace, use ctx to cancel
-	WatchAllNamespace(ctx context.Context, add, update, delete func(*appsv1.StatefulSet)) error
-	// list sts with limit
-	// return sts-list, continue, error
-	// if returned continue = nil, means that this is the last part of the list
-	LimitedListAllNamespace(limit int, cont *string) (*appsv1.StatefulSetList, *string, error)
-}
-
-type eventUtils interface {
-	// watch pod events in all namespaces, use ctx to cancel
-	WatchPodEventsAllNamespaces(ctx context.Context, callback func(*corev1.Event)) error
-}
+//type eventUtils interface {
+//	watch pod events in all namespaces, use ctx to cancel
+//WatchPodEventsAllNamespaces(ctx context.Context, callback func(*corev1.Event)) error
+//}
 
 type Syncer struct {
-	clustername string
-	addr        string
-	deploy      deploymentUtils
-	pod         podUtils
-	sts         statefulSetUtils
-	event       eventUtils
-	dbupdater   *instanceinfo.Client
+	clusterName string
+	dbUpdater   *instanceinfo.Client
 	bdl         *bundle.Bundle
+	client      *kubernetes.Clientset
 }
 
-func NewSyncer(clustername, addr string, db *instanceinfo.Client, bdl *bundle.Bundle,
-	podutils podUtils, stsutils statefulSetUtils, deployutils deploymentUtils, eventutils eventUtils) *Syncer {
-	return &Syncer{clustername, addr, deployutils, podutils, stsutils, eventutils, db, bdl}
+func NewSyncer(clusterName string, db *instanceinfo.Client, bdl *bundle.Bundle, client *kubernetes.Clientset) *Syncer {
+	return &Syncer{
+		clusterName: clusterName,
+		dbUpdater:   db,
+		bdl:         bdl,
+		client:      client,
+	}
 }
 
 func (s *Syncer) Sync(ctx context.Context) {
@@ -98,8 +77,7 @@ func (s *Syncer) gc(ctx context.Context) {
 
 func (s *Syncer) listSyncDeployment(ctx context.Context) {
 	var cont *string
-	var deploylist *appsv1.DeploymentList
-	var err error
+
 	for {
 		wait := waitSeconds(cont)
 		select {
@@ -107,17 +85,33 @@ func (s *Syncer) listSyncDeployment(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
-		deploylist, cont, err = s.deploy.LimitedListAllNamespace(100, cont)
+
+		options := metav1.ListOptions{
+			FieldSelector: "metadata.namespace!=default,metadata.namespace!=kube-system",
+			Limit:         100,
+		}
+
+		if cont != nil {
+			options.Continue = *cont
+		}
+
+		deployList, err := s.client.AppsV1().Deployments(metav1.NamespaceAll).List(context.Background(), options)
 		if err != nil {
 			logrus.Errorf("failed to list deployments: %v", err)
 			cont = nil
 			continue
 		}
-		if err := updateStatelessServiceDeployment(s.dbupdater, deploylist, false); err != nil {
+
+		// if returned continue = nil, means that this is the last part of the list
+		if deployList.ListMeta.Continue != "" {
+			cont = &deployList.ListMeta.Continue
+		}
+
+		if err := updateStatelessServiceDeployment(s.dbUpdater, deployList, false); err != nil {
 			logrus.Errorf("failed to update statless-service serviceinfo: %v", err)
 			continue
 		}
-		if err := updateAddonDeployment(s.dbupdater, deploylist, false); err != nil {
+		if err := updateAddonDeployment(s.dbUpdater, deployList, false); err != nil {
 			logrus.Errorf("failed to update addon serviceinfo: %v", err)
 			continue
 		}
@@ -126,8 +120,7 @@ func (s *Syncer) listSyncDeployment(ctx context.Context) {
 
 func (s *Syncer) listSyncStatefulSet(ctx context.Context) {
 	var cont *string
-	var stslist *appsv1.StatefulSetList
-	var err error
+
 	for {
 		wait := waitSeconds(cont)
 		select {
@@ -136,13 +129,28 @@ func (s *Syncer) listSyncStatefulSet(ctx context.Context) {
 		case <-time.After(wait):
 		}
 		waitSeconds(cont)
-		stslist, cont, err = s.sts.LimitedListAllNamespace(100, cont)
+
+		options := metav1.ListOptions{
+			FieldSelector: "metadata.namespace!=default,metadata.namespace!=kube-system",
+			Limit:         100,
+		}
+
+		if cont != nil {
+			options.Continue = *cont
+		}
+
+		stsList, err := s.client.AppsV1().StatefulSets(metav1.NamespaceAll).List(context.TODO(), options)
 		if err != nil {
 			logrus.Errorf("failed to list statefulset: %v", err)
 			cont = nil
 			continue
 		}
-		if err := updateAddonStatefulSet(s.dbupdater, stslist, false); err != nil {
+
+		if stsList.ListMeta.Continue != "" {
+			cont = &stsList.ListMeta.Continue
+		}
+
+		if err := updateAddonStatefulSet(s.dbUpdater, stsList, false); err != nil {
 			logrus.Errorf("failed to update addon serviceinfo: %v", err)
 			continue
 		}
@@ -150,9 +158,8 @@ func (s *Syncer) listSyncStatefulSet(ctx context.Context) {
 }
 
 func (s *Syncer) listSyncPod(ctx context.Context) {
-	var podlist *corev1.PodList
-	var err error
 	var initUpdateTime time.Time
+
 	for {
 		wait := waitSeconds(nil)
 		select {
@@ -161,75 +168,80 @@ func (s *Syncer) listSyncPod(ctx context.Context) {
 		case <-time.After(wait):
 		}
 		initUpdateTime = time.Now()
-		logrus.Infof("start listpods for: %s", s.addr)
-		podlist, err = s.pod.ListAllNamespace([]string{
-			"metadata.namespace!=default",
-			"metadata.namespace!=kube-system"})
+		logrus.Infof("start listpods for cluster: %s", s.clusterName)
+
+		podList, err := s.client.CoreV1().Pods(metav1.NamespaceAll).List(context.Background(), metav1.ListOptions{
+			FieldSelector: strutil.Join([]string{
+				"metadata.namespace!=default",
+				"metadata.namespace!=kube-system"}, ","),
+		})
+
 		if err != nil {
 			logrus.Errorf("failed to list pod: %v", err)
 			continue
 		}
-		logrus.Infof("listpods(%d) for: %s", len(podlist.Items), s.addr)
-		if err := updatePodAndInstance(s.dbupdater, podlist, false, nil); err != nil {
+		logrus.Infof("listpods(%d) for: %s", len(podList.Items), s.clusterName)
+		if err := updatePodAndInstance(s.dbUpdater, podList, false, nil); err != nil {
 			logrus.Errorf("failed to update instanceinfo: %v", err)
 			continue
 		}
-		logrus.Infof("export podlist info start: %s", s.addr)
-		exportPodErrInfo(s.bdl, podlist)
-		logrus.Infof("export podlist info end: %s", s.addr)
-		logrus.Infof("updatepods for: %s", s.addr)
+		logrus.Infof("export podlist info start, cluster: %s", s.clusterName)
+		exportPodErrInfo(s.bdl, podList)
+		logrus.Infof("export podlist info end, cluster: %s", s.clusterName)
+		logrus.Infof("updatepods for: %s, cluster", s.clusterName)
 		// it is last part of pod list, so execute gcAliveInstancesInDB
 		// GcAliveInstancesInDB is triggered after every 2 complete traversals
 		cost := int(time.Now().Sub(initUpdateTime).Seconds())
-		if err := gcAliveInstancesInDB(s.dbupdater, cost, s.clustername); err != nil {
+		if err := gcAliveInstancesInDB(s.dbUpdater, cost, s.clusterName); err != nil {
 			logrus.Errorf("failed to gcAliveInstancesInDB: %v", err)
 		}
 		cost2 := int(time.Now().Sub(initUpdateTime).Seconds())
-		if err := gcPodsInDB(s.dbupdater, cost2, s.clustername); err != nil {
+		if err := gcPodsInDB(s.dbUpdater, cost2, s.clusterName); err != nil {
 			logrus.Errorf("failed to gcPodsInDB: %v", err)
 		}
-		logrus.Infof("gcAliveInstancesInDB for: %s", s.addr)
+		logrus.Infof("gcAliveInstancesInDB for cluster: %s", s.clusterName)
 	}
 }
 
 func (s *Syncer) watchSyncDeployment(ctx context.Context) {
-	addOrUpdate, del := updateDeploymentOnWatch(s.dbupdater)
+	addOrUpdate, del := updateDeploymentOnWatch(s.dbUpdater)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Duration(10) * time.Second):
 		}
-		if err := s.deploy.WatchAllNamespace(ctx, addOrUpdate, addOrUpdate, del); err != nil {
+
+		if err := WatchDeployInAllNamespace(ctx, s.client, addOrUpdate, addOrUpdate, del); err != nil {
 			logrus.Errorf("failed to watch update deployment: %v", err)
 		}
 	}
 }
 
-func (s *Syncer) watchSyncStatefulset(ctx context.Context) {
-	addOrUpdate, del := updateAddonStatefulSetOnWatch(s.dbupdater)
+func (s *Syncer) watchSyncStatefulSet(ctx context.Context) {
+	addOrUpdate, del := updateAddonStatefulSetOnWatch(s.dbUpdater)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Duration(10) * time.Second):
 		}
-		if err := s.sts.WatchAllNamespace(ctx, addOrUpdate, addOrUpdate, del); err != nil {
+		if err := WatchStsInAllNamespace(ctx, s.client, addOrUpdate, addOrUpdate, del); err != nil {
 			logrus.Errorf("failed to watch update statefulset: %v", err)
 		}
 	}
 }
 
 func (s *Syncer) watchSyncPod(ctx context.Context) {
-	addOrUpdate, del := updatePodOnWatch(s.bdl, s.dbupdater, s.addr)
+	addOrUpdate, del := updatePodOnWatch(s.bdl, s.dbUpdater)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Duration(10) * time.Second):
 		}
-		if err := s.pod.WatchAllNamespace(ctx, addOrUpdate, addOrUpdate, del); err != nil {
-			logrus.Errorf("failed to watch update pod: %v, addr: %s", err, s.addr)
+		if err := WatchPodInAllNamespace(ctx, s.client, addOrUpdate, addOrUpdate, del); err != nil {
+			logrus.Errorf("failed to watch update pod: %v, cluster: %s", err, s.clusterName)
 		}
 	}
 }
@@ -241,31 +253,34 @@ func (s *Syncer) watchSyncEvent(ctx context.Context) {
 		}
 		ns := e.InvolvedObject.Namespace
 		name := e.InvolvedObject.Name
-		pod, err := s.pod.Get(ns, name)
+
+		pod, err := s.client.CoreV1().Pods(ns).Get(context.Background(), name, metav1.GetOptions{})
 		if err != nil {
 			logrus.Errorf("failed to get pod: %s/%s", ns, name)
 			return
 		}
-		if err := updatePodAndInstance(s.dbupdater, &corev1.PodList{Items: []corev1.Pod{*pod}}, false,
+
+		if err := updatePodAndInstance(s.dbUpdater, &corev1.PodList{Items: []corev1.Pod{*pod}}, false,
 			map[string]*corev1.Event{pod.Namespace + "/" + pod.Name: e}); err != nil {
 			logrus.Errorf("failed to updatepod: %v", err)
 			return
 		}
 	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Duration(10) * time.Second):
 		}
-		if err := s.event.WatchPodEventsAllNamespaces(ctx, callback); err != nil {
-			logrus.Errorf("failed to watch event: %v, addr: %s", err, s.addr)
+		if err := WatchPodEventsAllNamespaces(ctx, s.client, callback); err != nil {
+			logrus.Errorf("failed to watch event: %v, addr: %s", err, s.clusterName)
 		}
 	}
 }
 
 func (s *Syncer) gcDeadInstances(ctx context.Context) {
-	if err := gcDeadInstancesInDB(s.dbupdater); err != nil {
+	if err := gcDeadInstancesInDB(s.dbUpdater); err != nil {
 		logrus.Errorf("failed to gcInstancesInDB: %v", err)
 	}
 	for {
@@ -274,14 +289,14 @@ func (s *Syncer) gcDeadInstances(ctx context.Context) {
 			return
 		case <-time.After(time.Duration(24) * time.Hour):
 		}
-		if err := gcDeadInstancesInDB(s.dbupdater); err != nil {
+		if err := gcDeadInstancesInDB(s.dbUpdater); err != nil {
 			logrus.Errorf("failed to gcInstancesInDB: %v", err)
 		}
 	}
 }
 
 func (s *Syncer) gcServices(ctx context.Context) {
-	if err := gcServicesInDB(s.dbupdater); err != nil {
+	if err := gcServicesInDB(s.dbUpdater); err != nil {
 		logrus.Errorf("failed to gcServicesInDB: %v", err)
 	}
 	for {
@@ -290,17 +305,17 @@ func (s *Syncer) gcServices(ctx context.Context) {
 			return
 		case <-time.After(time.Duration(24) * time.Hour):
 		}
-		if err := gcServicesInDB(s.dbupdater); err != nil {
+		if err := gcServicesInDB(s.dbUpdater); err != nil {
 			logrus.Errorf("failed to gcServicesInDB: %v", err)
 		}
 	}
 }
 
 func waitSeconds(cont *string) time.Duration {
-	randsec := rand.Intn(5)
-	wait := time.Duration(180+randsec) * time.Second
+	randSec := rand.Intn(5)
+	wait := time.Duration(180+randSec) * time.Second
 	if cont == nil {
-		wait = time.Duration(60+randsec) * time.Second
+		wait = time.Duration(60+randSec) * time.Second
 	}
 	return wait
 }

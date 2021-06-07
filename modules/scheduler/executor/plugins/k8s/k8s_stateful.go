@@ -14,6 +14,8 @@
 package k8s
 
 import (
+	"context"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"strconv"
 	"strings"
 
@@ -24,12 +26,11 @@ import (
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/clusterinfo"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
 	"github.com/erda-project/erda/modules/scheduler/executor/util"
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
-func groupStatefulset(sg *apistructs.ServiceGroup) ([]*apistructs.ServiceGroup, error) {
+func groupStatefulSet(sg *apistructs.ServiceGroup) ([]*apistructs.ServiceGroup, error) {
 	group, ok := getGroupNum(sg)
 	if !ok || group == "1" {
 		return []*apistructs.ServiceGroup{sg}, nil
@@ -318,12 +319,14 @@ func (k *Kubernetes) createStatefulService(sg *apistructs.ServiceGroup) error {
 	svc := sg.Services[0]
 
 	newService(&svc)
-	svc.Name = statefulsetName(sg)
+	svc.Name = getStatefulSetName(sg)
 	k8sSvc := newService(&svc)
 
-	if err := k.service.Create(k8sSvc); err != nil {
+	_, err := k.k8sClient.CoreV1().Services(k8sSvc.Namespace).Create(context.Background(), k8sSvc, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
+
 	v, ok := sg.Services[0].Labels["HAPROXY_0_VHOST"]
 	// No external domain name
 	if !ok {
@@ -352,7 +355,12 @@ func (k *Kubernetes) createStatefulService(sg *apistructs.ServiceGroup) error {
 		},
 	}
 
-	return k.ingress.Create(ingress)
+	_, err = k.k8sClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Create(context.Background(), ingress, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // TODO: State need more precise
@@ -372,7 +380,7 @@ func (k *Kubernetes) GetStatefulStatus(sg *apistructs.ServiceGroup) (apistructs.
 		return k.getOneStatus(namespace, statefulName)
 	}
 	// have many statefulset， Need to combine state
-	groups, err := groupStatefulset(sg)
+	groups, err := groupStatefulSet(sg)
 	if err != nil {
 		return status, err
 	}
@@ -394,9 +402,9 @@ func (k *Kubernetes) GetStatefulStatus(sg *apistructs.ServiceGroup) (apistructs.
 func (k *Kubernetes) getOneStatus(namespace, name string) (apistructs.StatusDesc, error) {
 	logrus.Infof("in getOneStatus, name: %s, namespace: %s", name, namespace)
 	var status apistructs.StatusDesc
-	set, err := k.sts.Get(namespace, name)
+	set, err := k.k8sClient.AppsV1().StatefulSets(namespace).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
-		if err == k8serror.ErrNotFound {
+		if k8serrors.IsNotFound(err) {
 			status.Status = apistructs.StatusProgressing
 			status.LastMessage = "currently could not get the pod"
 			return status, nil
@@ -428,7 +436,7 @@ func (k *Kubernetes) getOneStatus(namespace, name string) (apistructs.StatusDesc
 }
 
 func (k *Kubernetes) inspectOne(g *apistructs.ServiceGroup, namespace, name string, groupNum int) (*OneGroupInfo, error) {
-	set, err := k.sts.Get(namespace, name)
+	set, err := k.k8sClient.AppsV1().StatefulSets(namespace).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -451,10 +459,11 @@ func (k *Kubernetes) inspectOne(g *apistructs.ServiceGroup, namespace, name stri
 
 	for i := 0; i < int(replica); i++ {
 		podName := strutil.Concat(container.Name, "-", strconv.Itoa(i))
-		pod, err := k.pod.Get(namespace, podName)
-		if err != nil && err != k8serror.ErrNotFound {
+		pod, err := k.k8sClient.CoreV1().Pods(namespace).Get(context.Background(), podName, metav1.GetOptions{})
+		if err != nil && !k8serrors.IsNotFound(err) {
 			return nil, err
 		}
+
 		key := strutil.Concat("G", strconv.Itoa(groupNum), "_N", strconv.Itoa(i))
 		serviceName, ok := set.Annotations[key]
 		if !ok {
@@ -510,7 +519,7 @@ func (k *Kubernetes) inspectOne(g *apistructs.ServiceGroup, namespace, name stri
 
 // inspect multiple statefulset
 func (k *Kubernetes) inspectGroup(g *apistructs.ServiceGroup, namespace, name string) (*apistructs.ServiceGroup, error) {
-	mygroups, err := groupStatefulset(g)
+	mygroups, err := groupStatefulSet(g)
 	if err != nil {
 		logrus.Errorf("failed to get groups sequence in inspectgroup, namespace: %s, name: %s", g.Type, g.ID)
 		return nil, err

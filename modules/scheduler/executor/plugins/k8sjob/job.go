@@ -33,6 +33,7 @@ import (
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/clusterinfo"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/event"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/toleration"
+	"github.com/erda-project/erda/modules/scheduler/executor/util"
 	"github.com/erda-project/erda/modules/scheduler/schedulepolicy/constraintbuilders"
 	"github.com/erda-project/erda/modules/scheduler/schedulepolicy/labelconfig"
 	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
@@ -65,46 +66,40 @@ const (
 func init() {
 	executortypes.Register(executorKind, func(name executortypes.Name, clusterName string, options map[string]string, optionsPlus interface{}) (
 		executortypes.Executor, error) {
-		addr, ok := options["ADDR"]
-		if !ok {
-			return nil, errors.Errorf("not found k8s address in env variables")
-		}
 		var (
-			client *kubernetes.Clientset
-			err    error
+			clusterInfo *clusterinfo.ClusterInfo
 		)
-		client, err = kubernetes.NewKubernetesClientSet("")
+
+		// TODELETE
+		clientSet, err := util.GetClientSet(clusterName, options)
+		if err != nil {
+			return nil, err
+		}
+
+		res, err := clientSet.K8sClient.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			logrus.Error("[job]client-go connect test------>", err.Error())
+			return nil, err
+		}
+		fmt.Println("[job]client-go connect test------>", len(res.Items), clusterName)
+
+		clusterInfo, err = clusterinfo.New(clusterName, clusterinfo.WithKubernetesClient(clientSet.K8sClient))
 		if err != nil {
 			return nil, errors.Errorf("failed to new cluster info, executorName: %s, clusterName: %s, (%v)",
 				name, clusterName, err)
 		}
 
-		// Determine whether existed an http protocol to adapt to the edas platform
-		if strings.HasPrefix(addr, "inet://") || strings.HasPrefix(addr, "http") {
-			client, err = kubernetes.NewKubernetesClientSet(addr)
-			if err != nil {
-				return nil, errors.Errorf("failed to new cluster info, executorName: %s, clusterName: %s, (%v)",
-					name, clusterName, err)
-			}
+		if clusterInfo != nil {
+			// Synchronize cluster info (every 10m)
+			go clusterInfo.LoopLoadAndSync(context.Background(), false)
 		}
-
-		clusterInfo, err := clusterinfo.New(clusterName, clusterinfo.WithKubernetesClient(client))
-		if err != nil {
-			return nil, errors.Errorf("failed to new cluster info, executorName: %s, clusterName: %s, (%v)",
-				name, clusterName, err)
-		}
-
-		// Synchronize cluster info (every 10m)
-		go clusterInfo.LoopLoadAndSync(context.Background(), false)
 
 		return &k8sJob{
 			name:        name,
 			clusterName: clusterName,
-			options:     options,
-			addr:        addr,
-			client:      client,
+			client:      clientSet.K8sClient,
 			clusterInfo: clusterInfo,
-			event:       event.New(event.WithKubernetesClient(client)),
+			event:       event.New(event.WithKubernetesClient(clientSet.K8sClient)),
 		}, nil
 	})
 }
@@ -112,8 +107,6 @@ func init() {
 type k8sJob struct {
 	name        executortypes.Name
 	clusterName string
-	options     map[string]string
-	addr        string
 	client      *kubernetes.Clientset
 	clusterInfo *clusterinfo.ClusterInfo
 	event       *event.Event

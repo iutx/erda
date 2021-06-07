@@ -14,11 +14,15 @@
 package k8s
 
 import (
+	"context"
+
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	apiv1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/erda-project/erda/apistructs"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
@@ -36,8 +40,8 @@ func MakeNamespace(sg *apistructs.ServiceGroup) string {
 }
 
 // CreateNamespace create namespace
-func (k *Kubernetes) CreateNamespace(ns string, sg *apistructs.ServiceGroup) error {
-	notfound, err := k.NotfoundNamespace(ns)
+func (k *Kubernetes) CreateNamespace(nsName string, sg *apistructs.ServiceGroup) error {
+	notfound, err := k.NotfoundNamespace(nsName)
 	if err != nil {
 		return err
 	}
@@ -46,7 +50,7 @@ func (k *Kubernetes) CreateNamespace(ns string, sg *apistructs.ServiceGroup) err
 		if sg.ProjectNamespace != "" {
 			return nil
 		}
-		return errors.Errorf("failed to create namespace, ns: %s, (namespace already exists)", ns)
+		return errors.Errorf("failed to create namespace, ns: %s, (namespace already exists)", nsName)
 	}
 
 	labels := map[string]string{}
@@ -55,24 +59,29 @@ func (k *Kubernetes) CreateNamespace(ns string, sg *apistructs.ServiceGroup) err
 		labels["istio-injection"] = "enabled"
 	}
 
-	if err = k.namespace.Create(ns, labels); err != nil {
+	ns := GenerateNamespaceWithLabels(nsName, labels)
+
+	_, err = k.k8sClient.CoreV1().Namespaces().Create(context.Background(), ns, metav1.CreateOptions{})
+	if err != nil {
 		return err
 	}
+
 	// Create imagePullSecret under this namespace
-	if err = k.NewRuntimeImageSecret(ns, sg); err != nil {
+	if err = k.NewRuntimeImageSecret(nsName, sg); err != nil {
 		logrus.Errorf("failed to create imagePullSecret, namespace: %s, (%v)", ns, err)
 	}
+
 	return nil
 }
 
 // UpdateNamespace
-func (k *Kubernetes) UpdateNamespace(ns string, sg *apistructs.ServiceGroup) error {
-	notfound, err := k.NotfoundNamespace(ns)
+func (k *Kubernetes) UpdateNamespace(nsName string, sg *apistructs.ServiceGroup) error {
+	notfound, err := k.NotfoundNamespace(nsName)
 	if err != nil {
 		return err
 	}
 	if notfound {
-		return errors.Errorf("not found ns: %v", ns)
+		return errors.Errorf("not found ns: %v", nsName)
 	}
 
 	labels := map[string]string{}
@@ -81,22 +90,39 @@ func (k *Kubernetes) UpdateNamespace(ns string, sg *apistructs.ServiceGroup) err
 		labels["istio-injection"] = "enabled"
 	}
 
-	return k.namespace.Update(ns, labels)
+	ns := GenerateNamespaceWithLabels(nsName, labels)
+
+	_, err = k.k8sClient.CoreV1().Namespaces().Update(context.Background(), ns, metav1.UpdateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // NotfoundNamespace not found namespace
 func (k *Kubernetes) NotfoundNamespace(ns string) (bool, error) {
-	err := k.namespace.Exists(ns)
+	_, err := k.k8sClient.CoreV1().Namespaces().Get(context.Background(), ns, metav1.GetOptions{})
 	if err != nil {
-		if k8serror.NotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			return true, nil
 		}
 		return false, err
 	}
+
 	return false, nil
 }
 
-// DeleteNamespace delete namepsace
-func (k *Kubernetes) DeleteNamespace(ns string) error {
-	return k.namespace.Delete(ns)
+// GenerateNamespaceWithLabels generate namespace with labels
+func GenerateNamespaceWithLabels(ns string, labels map[string]string) *apiv1.Namespace {
+	return &apiv1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   ns,
+			Labels: labels,
+		},
+	}
 }

@@ -152,13 +152,13 @@ func (info ClusterInfoData) GetIstioInfo() IstioInfo {
 }
 
 func (info ClusterInfoData) GetApiServerUrl() string {
-	netportalUrl := info.Get(NETPORTAL_URL)
+	//netportalUrl := info.Get(NETPORTAL_URL)
 	masterAddr := info.Get(MASTER_VIP_ADDR)
-	if netportalUrl == "" {
-		return masterAddr
-	} else {
-		return netportalUrl + "/" + masterAddr
-	}
+	//if netportalUrl == "" {
+	return masterAddr
+	//} else {
+	//	return netportalUrl + "/" + masterAddr
+	//}
 }
 
 type ClusterResourceInfoResponse struct {

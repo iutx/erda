@@ -23,6 +23,7 @@ type ExecutorConfig struct {
 	Kind        string            `json:"kind,omitempty"`
 	Name        string            `json:"name,omitempty"`
 	ClusterName string            `json:"clusterName,omitempty"`
+	ManageType  string            `json:"manageType,omitempty"`
 	Options     map[string]string `json:"options,omitempty"`
 	OptionsPlus *OptPlus          `json:"optionsPlus,omitempty"`
 }

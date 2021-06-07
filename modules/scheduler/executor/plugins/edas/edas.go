@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/erda-project/erda/pkg/clientgo/kubernetes"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"math"
 	"net/http"
 	"os"
@@ -40,10 +42,7 @@ import (
 	"github.com/erda-project/erda/modules/scheduler/events/eventtypes"
 	"github.com/erda-project/erda/modules/scheduler/executor/executortypes"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/deployment"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8sapi"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8serror"
-	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/k8sservice"
 	"github.com/erda-project/erda/modules/scheduler/executor/plugins/k8s/resourceinfo"
 	"github.com/erda-project/erda/modules/scheduler/executor/util"
 	"github.com/erda-project/erda/pkg/httpclient"
@@ -139,14 +138,12 @@ func init() {
 			return nil, errors.Errorf("not found dice registry addr in env variables")
 		}
 
-		k8sDeployClient := deployment.New(deployment.WithCompleteParams(kubeAddr, kubeClient))
-		k8sSvcClient := k8sservice.New(k8sservice.WithCompleteParams(kubeAddr, kubeClient))
 		notifier, err := eventapi.New(string(name), nil)
 		if err != nil {
 			logrus.Errorf("executor(%s) call eventbox new api error: %v", name, err)
 			return nil, err
 		}
-		resourceInfo := resourceinfo.New(kubeAddr, kubeClient)
+		resourceInfo := resourceinfo.New(nil)
 
 		edas := &EDAS{
 			name:            name,
@@ -162,8 +159,6 @@ func init() {
 			client:          client,
 			kubeClient:      kubeClient,
 			notifier:        notifier,
-			k8sDeployClient: k8sDeployClient,
-			k8sSvcClient:    k8sSvcClient,
 			unlimitCPU:      unlimitCPU,
 			resourceInfo:    resourceInfo,
 		}
@@ -183,11 +178,12 @@ func init() {
 
 // EDAS edas server structure
 type EDAS struct {
-	name     executortypes.Name
-	options  map[string]string
-	addr     string
-	kubeAddr string
-	regAddr  string
+	name      executortypes.Name
+	options   map[string]string
+	k8sClient *kubernetes.Clientset
+	addr      string
+	kubeAddr  string
+	regAddr   string
 	// default: "cn-hangzhou"
 	regionID string
 	// EDAS namespace, the default is the same as regionID
@@ -198,11 +194,9 @@ type EDAS struct {
 	// EDAS Cluster ID
 	clusterID string
 	// edas pop client
-	client          *api.Client
-	kubeClient      *httpclient.HTTPClient
-	notifier        eventapi.Notifier
-	k8sDeployClient *deployment.Deployment
-	k8sSvcClient    *k8sservice.Service
+	client     *api.Client
+	kubeClient *httpclient.HTTPClient
+	notifier   eventapi.Notifier
 	// Whether to limit the application of CPU resources less than 1c
 	unlimitCPU   string
 	resourceInfo *resourceinfo.ResourceInfo
@@ -412,18 +406,22 @@ func (e *EDAS) Update(ctx context.Context, specObj interface{}) (interface{}, er
 
 //Get the deploy list of corresponding runtime from k8s api
 func (e *EDAS) getK8sDeployList(namespace string, name string, services *[]apistructs.Service) (interface{}, error) {
-	var err error
-	var edasAhasName string
-	var kubeSvc *k8sapi.Service
-	var port int32
-	var cpu int64
-	var mem int64
-	var replicas int32
-	var image string
+	var (
+		err          error
+		edasAhasName string
+		kubeSvc      *k8sapi.Service
+		port         int32
+		cpu          int64
+		mem          int64
+		replicas     int32
+		image        string
+	)
+
 	group := namespace + "-" + name
 	logrus.Debugf("[EDAS] get deploylist from group: %+v", group)
 
-	deployList, err := e.k8sDeployClient.List(defaultNamespace, nil)
+	deployList, err := e.k8sClient.AppsV1().Deployments(defaultNamespace).List(context.Background(), metav1.ListOptions{})
+
 	if err != nil {
 		return nil, err
 	}
@@ -596,8 +594,12 @@ func (e *EDAS) createK8sService(appName string, appID string, ports []int) error
 		})
 	}
 	logrus.Errorf("[EDAS] Start to create k8s svc, appName: %s", appName)
-	err := e.k8sSvcClient.Create(k8sService)
-	return err
+	_, err := e.k8sClient.CoreV1().Services(defaultNamespace).Create(context.Background(), k8sService, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (e *EDAS) updateService(ctx context.Context, runtime *apistructs.ServiceGroup, s *apistructs.Service) error {
@@ -630,9 +632,9 @@ func (e *EDAS) updateService(ctx context.Context, runtime *apistructs.ServiceGro
 			return errors.Wrap(err, "fill service spec")
 		}
 
-		_, err = e.k8sSvcClient.Get(defaultNamespace, appName)
+		_, err = e.k8sClient.CoreV1().Services(defaultNamespace).Get(context.Background(), appName, metav1.GetOptions{})
 
-		if err == k8serror.ErrNotFound {
+		if k8serrors.IsNotFound(err) {
 			if err := e.createK8sService(appName, appID, diceyml.ComposeIntPortsFromServicePorts(s.Ports)); err != nil {
 				logrus.Errorf("[EDAS] Failed to create k8s service, appName: %s, error: %v", appName, err)
 				return errors.Wrap(err, "edas create k8s service")
@@ -662,7 +664,7 @@ func (e *EDAS) removeService(ctx context.Context, group string, s *apistructs.Se
 		return err
 	}
 
-	err = e.k8sSvcClient.Delete(defaultNamespace, appName)
+	err = e.k8sClient.CoreV1().Services(defaultNamespace).Delete(context.Background(), appName, metav1.DeleteOptions{})
 	if err != nil {
 		logrus.Errorf("[EDAS] Failed to delete k8s svc of app(%s): %v", appName, err)
 		return err

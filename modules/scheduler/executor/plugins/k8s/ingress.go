@@ -14,10 +14,12 @@
 package k8s
 
 import (
+	"context"
 	"strings"
 
 	"github.com/pkg/errors"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -29,11 +31,52 @@ func (k *Kubernetes) createIngress(svc *apistructs.Service) error {
 	if err != nil {
 		return err
 	}
-	if ing != nil {
-		return k.ingress.Create(ing)
+	if ing == nil {
+		return nil
 	}
+
+	_, err = k.k8sClient.ExtensionsV1beta1().Ingresses(ing.Namespace).Create(context.Background(), ing, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
+
+func (k *Kubernetes) updateIngress(svc *apistructs.Service) error {
+	ns := svc.Namespace
+	name := svc.Name
+
+	ing, err := buildIngress(svc)
+	if err != nil {
+		return err
+	}
+
+	_, err = k.k8sClient.ExtensionsV1beta1().Ingresses(ns).Get(context.Background(), name, metav1.GetOptions{})
+
+	// If there is no need to update, determine whether you need to delete the remaining ingress
+	if ing == nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return k.k8sClient.ExtensionsV1beta1().Ingresses(ns).Delete(context.Background(), name, metav1.DeleteOptions{})
+	}
+
+	if k8serrors.IsNotFound(err) {
+		_, err = k.k8sClient.ExtensionsV1beta1().Ingresses(ns).Create(context.Background(), ing, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err = k.k8sClient.ExtensionsV1beta1().Ingresses(ns).Update(context.Background(), ing, metav1.UpdateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func buildIngress(svc *apistructs.Service) (*extensionsv1beta1.Ingress, error) {
 	if svc.Labels["IS_ENDPOINT"] != "true" {
 		return nil, nil
@@ -97,26 +140,4 @@ func buildTLS(publicHosts []string) []extensionsv1beta1.IngressTLS {
 		tls[0].Hosts[i] = host
 	}
 	return tls
-}
-
-func (k *Kubernetes) updateIngress(svc *apistructs.Service) error {
-	var err error
-
-	ing, err := buildIngress(svc)
-	if err != nil {
-		return err
-	}
-
-	// If you need to update ingress, determine whether it is create or update
-	if ing != nil {
-		return k.ingress.CreateOrUpdate(ing)
-	}
-
-	// If there is no need to update, determine whether you need to delete the remaining ingress
-	return k.ingress.DeleteIfExists(svc.Namespace, svc.Name)
-}
-
-// delete ingress resource
-func (k *Kubernetes) deleteIngress(namespace, name string) error {
-	return k.ingress.Delete(namespace, name)
 }

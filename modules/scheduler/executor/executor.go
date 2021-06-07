@@ -15,6 +15,7 @@ package executor
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -87,6 +88,9 @@ func (m *Manager) initialize() error {
 					logrus.Errorf("updating executor(name: %s, key: %s) error: %v", config.Name, k, err)
 				}
 			case storetypes.Add:
+				if !strings.Contains(config.Name, "FAKE") {
+					break
+				}
 				logrus.Infof("watched executor(%s) created, key: %s", config.Name, k)
 				conf.GetConfStore().ExecutorStore.Store(config.Name, config)
 				if err := createOneExecutor(m, config); err != nil {
