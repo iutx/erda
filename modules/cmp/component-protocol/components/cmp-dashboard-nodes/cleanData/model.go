@@ -12,35 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package PodStatus
+package cleanData
 
-import (
-	"github.com/erda-project/erda/modules/openapi/component-protocol/components/base"
-)
+import "github.com/erda-project/erda/modules/openapi/component-protocol/components/base"
 
-type PodStatus struct {
+type Clean struct {
+	State map[string]interface{} `json:"state"`
 	base.DefaultProvider
-
-	Type  string `json:"type"`
-	Data  Data   `json:"data,omitempty"`
-	Props Props  `json:"props"`
-	State State  `json:"state,omitempty"`
-}
-
-type Props struct {
-	Size string `json:"size,omitempty"`
-}
-
-type Data struct {
-	Labels Labels `json:"labels,omitempty"`
-}
-
-type Labels struct {
-	Label string `json:"label,omitempty"`
-	Color string `json:"color,omitempty"`
-}
-
-type State struct {
-	ClusterName string `json:"clusterName,omitempty"`
-	PodID       string `json:"podId,omitempty"`
 }

@@ -12,39 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package workloadStatus
+package cleanData
 
 import (
+	"context"
+
+	"github.com/erda-project/erda-infra/base/servicehub"
 	"github.com/erda-project/erda-infra/providers/component-protocol/cptype"
-	"github.com/erda-project/erda/bundle"
 	"github.com/erda-project/erda/modules/openapi/component-protocol/components/base"
 )
 
-type ComponentWorkloadStatus struct {
-	base.DefaultProvider
-	sdk *cptype.SDK
-	bdl *bundle.Bundle
-
-	Type  string `json:"type,omitempty"`
-	Data  Data   `json:"data,omitempty"`
-	Props Props  `json:"props,omitempty"`
-	State State  `json:"state,omitempty"`
+func (cl Clean) Render(ctx context.Context, c *cptype.Component, scenario cptype.Scenario, event cptype.ComponentEvent, gs *cptype.GlobalStateData) error {
+	delete(*gs, "nodes")
+	cl.State = map[string]interface{}{}
+	c.State = cl.State
+	return nil
 }
-
-type Props struct {
-	Size string `json:"size,omitempty"`
-}
-
-type Data struct {
-	Labels Labels `json:"labels,omitempty"`
-}
-
-type Labels struct {
-	Label string `json:"label,omitempty"`
-	Color string `json:"color,omitempty"`
-}
-
-type State struct {
-	ClusterName string `json:"clusterName,omitempty"`
-	WorkloadID  string `json:"workloadId,omitempty"`
+func init() {
+	base.InitProviderWithCreator("cmp-dashboard-nodes", "cleanData", func() servicehub.Provider {
+		return &Clean{State: map[string]interface{}{}}
+	})
 }

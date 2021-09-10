@@ -12,10 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package types
+package ddlconv_test
 
-const (
-	GlobalCtxKeyBundle   = "__bundle__"
-	IssueStateService    = "issueState"
-	IssueFilterBmService = "issueFilterBookmark"
+import (
+	"testing"
+
+	"github.com/pingcap/parser"
+	"github.com/pingcap/parser/ast"
+
+	"github.com/erda-project/erda/pkg/swagger/ddlconv"
 )
+
+func TestExtractCreateName(t *testing.T) {
+	sql := `create table t1 (id bigint);`
+	node, err := parser.New().ParseOneStmt(sql, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := ddlconv.ExtractCreateName(node.(*ast.CreateTableStmt))
+	if name != "t1" {
+		t.Fatalf("failed to extract name: %s", name)
+	}
+}

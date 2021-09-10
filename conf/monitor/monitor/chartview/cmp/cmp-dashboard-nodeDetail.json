@@ -14,6 +14,12 @@
         "i": "view-gFiqDRf8",
         "view": {
           "title": "cpu usage",
+          "i18n": {
+            "title": {
+              "en": "cpu usage",
+              "zh": "cpu 使用率"
+            }
+          },
           "description": "",
           "chartType": "chart:line",
           "dataSourceType": "api",
@@ -116,18 +122,23 @@
             },
             "url": "/api/orgCenter/metrics-query"
           },
-          "controls": null,
-          "i18n": null
+          "controls": null
         }
       },
       {
         "w": 8,
         "h": 9,
-        "x": 0,
-        "y": 9,
+        "x": 8,
+        "y": 0,
         "i": "view-EYTeXEO3",
         "view": {
           "title": "memory usage",
+          "i18n": {
+            "title": {
+              "en": "memory usage",
+              "zh": "内存使用率"
+            }
+          },
           "description": "",
           "chartType": "chart:line",
           "dataSourceType": "api",
@@ -230,18 +241,23 @@
             },
             "url": "/api/orgCenter/metrics-query"
           },
-          "controls": null,
-          "i18n": null
+          "controls": null
         }
       },
       {
         "w": 8,
         "h": 9,
-        "x": 0,
-        "y": 18,
+        "x": 16,
+        "y": 0,
         "i": "view-u2XKlluN",
         "view": {
-          "title": "load rate5",
+          "title": "disk load rate",
+          "i18n": {
+            "title": {
+              "en": "disk load rate",
+              "zh": "磁盘负载速率"
+            }
+          },
           "description": "",
           "chartType": "chart:line",
           "dataSourceType": "api",
@@ -344,18 +360,23 @@
             },
             "url": "/api/orgCenter/metrics-query"
           },
-          "controls": null,
-          "i18n": null
+          "controls": null
         }
       },
       {
         "w": 8,
         "h": 9,
         "x": 0,
-        "y": 27,
+        "y": 9,
         "i": "view-JXTWYiZP",
         "view": {
           "title": "io rate",
+          "i18n": {
+            "title": {
+              "en": "disk io rate",
+              "zh": "磁盘吞吐速率"
+            }
+          },
           "description": "",
           "chartType": "chart:line",
           "dataSourceType": "api",
@@ -470,18 +491,23 @@
             },
             "url": "/api/orgCenter/metrics-query"
           },
-          "controls": null,
-          "i18n": null
+          "controls": null
         }
       },
       {
         "w": 8,
         "h": 9,
-        "x": 0,
-        "y": 36,
+        "x": 8,
+        "y": 9,
         "i": "view-QWRT8bM3",
         "view": {
           "title": "network io",
+          "i18n": {
+            "title": {
+              "en": "network IO",
+              "zh": "网络吞吐速率"
+            }
+          },
           "description": "",
           "chartType": "chart:line",
           "dataSourceType": "api",
@@ -595,8 +621,7 @@
             },
             "url": "/api/orgCenter/metrics-query"
           },
-          "controls": null,
-          "i18n": null
+          "controls": null
         }
       }
     ]
