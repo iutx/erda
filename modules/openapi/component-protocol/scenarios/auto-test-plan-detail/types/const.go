@@ -12,31 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package common
+package types
 
-import (
-	"errors"
-	"strings"
-
-	"github.com/erda-project/erda-infra/providers/component-protocol/cptype"
+const (
+	AutotestGlobalKeyEnvData = "envData"
 )
-
-var (
-	CMPDashboardAddLabel    cptype.OperationKey = "addLabel"
-	CMPDashboardRemoveLabel cptype.OperationKey = "deleteLabel"
-
-	NothingToBeDoneErr = errors.New("nothing to be done")
-
-	TypeNotAvailableErr = errors.New("type not available")
-	ResourceNotFoundErr = errors.New("resource type not available")
-
-	//util error
-	PtrRequiredErr = errors.New("ptr is required")
-)
-
-func GetStatus(s string) string {
-	if strings.ToLower(s) == "ready" {
-		return "success"
-	}
-	return "error"
-}

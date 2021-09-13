@@ -12,31 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package common
+package cmp
 
 import (
-	"errors"
-	"strings"
+	"github.com/rancher/apiserver/pkg/types"
 
-	"github.com/erda-project/erda-infra/providers/component-protocol/cptype"
+	"github.com/erda-project/erda/modules/openapi/api/apis"
 )
 
-var (
-	CMPDashboardAddLabel    cptype.OperationKey = "addLabel"
-	CMPDashboardRemoveLabel cptype.OperationKey = "deleteLabel"
-
-	NothingToBeDoneErr = errors.New("nothing to be done")
-
-	TypeNotAvailableErr = errors.New("type not available")
-	ResourceNotFoundErr = errors.New("resource type not available")
-
-	//util error
-	PtrRequiredErr = errors.New("ptr is required")
-)
-
-func GetStatus(s string) string {
-	if strings.ToLower(s) == "ready" {
-		return "success"
-	}
-	return "error"
+var CMP_STEVE_PATCH = apis.ApiSpec{
+	Path:         "/api/k8s/clusters/<*>",
+	BackendPath:  "/api/k8s/clusters/<*>",
+	Method:       "PATCH",
+	Host:         "cmp.marathon.l4lb.thisdcos.directory:9027",
+	K8SHost:      "cmp:9027",
+	Scheme:       "http",
+	Audit:        nil,
+	CheckLogin:   true,
+	Doc:          "update a k8s resource",
+	ResponseType: types.RawResource{},
+	IsOpenAPI:    true,
 }
