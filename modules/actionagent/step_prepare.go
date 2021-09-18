@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -34,22 +35,65 @@ const (
 
 // 对于 custom action，需要将 commands 转换为 script 来执行
 func (agent *Agent) prepare() {
+	cmd := exec.Command("ls", "-l", "/home", "/")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Println(err)
+	}
+
+	cmd = exec.Command("whoami")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Println(err)
+	}
+
+	if err := os.MkdirAll("/tmp/pipeline/container", 0777); err != nil {
+		logrus.Errorf("create dir error: %v", err)
+		agent.AppendError(err)
+	}
+
+	cmd = exec.Command("ls", "-la", "/tmp")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Println(err)
+	}
+
 	// 1. create contextDir/workDir/dir(metaFile)/uploadDir/tempTarUploadDir
-	if err := os.MkdirAll(agent.EasyUse.ContainerContext, 0755); err != nil {
+	if err := os.MkdirAll(agent.EasyUse.ContainerContext, 0777); err != nil {
+		logrus.Errorf("create dir %s error: %v", agent.EasyUse.ContainerContext, err)
 		agent.AppendError(err)
 	}
-	if err := os.MkdirAll(agent.EasyUse.ContainerWd, 0755); err != nil {
+
+	cmd = exec.Command("ls", "-la", "/home")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Println(err)
+	}
+
+	if err := os.MkdirAll(agent.EasyUse.ContainerWd, 0777); err != nil {
+		logrus.Errorf("create dir %s error: %v", agent.EasyUse.ContainerWd, err)
 		agent.AppendError(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(agent.EasyUse.ContainerMetaFile), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(agent.EasyUse.ContainerMetaFile), 0777); err != nil {
+		logrus.Errorf("create dir %s error: %v", agent.EasyUse.ContainerMetaFile, err)
 		agent.AppendError(err)
 	}
 	if agent.EasyUse.ContainerUploadDir != "" {
-		if err := os.MkdirAll(agent.EasyUse.ContainerUploadDir, 0755); err != nil {
+		if err := os.MkdirAll(agent.EasyUse.ContainerUploadDir, 0777); err != nil {
+			logrus.Errorf("create dir %s error: %v", agent.EasyUse.ContainerUploadDir, err)
 			agent.AppendError(err)
 		}
 	}
-	if err := os.Mkdir(agent.EasyUse.ContainerTempTarUploadDir, 0755); err != nil {
+	if err := os.Mkdir(agent.EasyUse.ContainerTempTarUploadDir, 0777); err != nil {
+		logrus.Errorf("create dir %s error: %v", agent.EasyUse.ContainerTempTarUploadDir, err)
 		agent.AppendError(err)
 	}
 	// {
@@ -60,7 +104,8 @@ func (agent *Agent) prepare() {
 	//     }
 	// }
 	for _, f := range agent.Arg.Context.CmsDiceFiles {
-		if err := os.MkdirAll(filepath.Dir(f.Value), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(f.Value), 0777); err != nil {
+			logrus.Errorf("create dir %s error: %v", filepath.Dir(f.Value), err)
 			agent.AppendError(err)
 		}
 	}

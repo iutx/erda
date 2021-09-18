@@ -31,34 +31,38 @@ func (agent *Agent) Execute(r io.Reader) {
 	if debug {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
-
+	logrus.Infof("before get openapi info")
 	agent.getOpenAPIInfo()
 	if len(agent.Errs) > 0 {
 		return
 	}
-
+	logrus.Infof("before parse arg")
 	agent.parseArg(r)
 	if len(agent.Errs) > 0 {
 		return
 	}
 
+	logrus.Infof("before pull bootstrap info")
 	agent.pullBootstrapInfo()
 	if len(agent.Errs) > 0 {
 		return
 	}
 
+	logrus.Infof("before validate")
 	// 1. validate
 	agent.validate()
 	if len(agent.Errs) > 0 {
 		return
 	}
 
+	logrus.Infof("before prepare")
 	// 2. prepare
 	agent.prepare()
 	if len(agent.Errs) > 0 {
 		return
 	}
 
+	logrus.Infof("before restore")
 	// 3. restore / store
 	agent.restore()
 	if len(agent.Errs) > 0 {
@@ -71,6 +75,7 @@ func (agent *Agent) Execute(r io.Reader) {
 	go agent.ListenSignal()
 	go agent.watchFiles()
 
+	logrus.Infof("before logic")
 	// 4. logic
 	agent.logic()
 	if len(agent.Errs) > 0 {

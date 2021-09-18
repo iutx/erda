@@ -16,6 +16,8 @@ RUN md5sum /opt/action/agent | cut -d ' ' -f1 > /opt/action/action-agent-md5 && 
 
 FROM busybox
 
+USER root
+
 COPY --from=build /opt/action/agent /opt/action/agent
 COPY --from=build /opt/action/action-agent-md5 /opt/action/action-agent-md5
 

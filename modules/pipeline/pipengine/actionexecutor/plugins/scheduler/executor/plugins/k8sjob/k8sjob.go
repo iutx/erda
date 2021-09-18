@@ -417,7 +417,7 @@ func (k *K8sJob) generateKubeJob(specObj interface{}) (*batchv1.Job, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	runID := int64(1000)
 	backofflimit := int32(job.BackoffLimit)
 	kubeJob := &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{
@@ -466,12 +466,19 @@ func (k *K8sJob) generateKubeJob(specObj interface{}) (*batchv1.Job, error) {
 							},
 							ImagePullPolicy: logic.GetPullImagePolicy(),
 							VolumeMounts:    volMounts,
+							SecurityContext: &corev1.SecurityContext{
+								RunAsGroup: &runID,
+								RunAsUser:  &runID,
+							},
 						},
 					},
 					RestartPolicy:         corev1.RestartPolicyNever,
 					Volumes:               vols,
 					EnableServiceLinks:    func(enable bool) *bool { return &enable }(false),
 					ShareProcessNamespace: func(b bool) *bool { return &b }(false),
+					SecurityContext: &corev1.PodSecurityContext{
+						FSGroup: &runID,
+					},
 				},
 			},
 		},
@@ -539,11 +546,16 @@ func (k *K8sJob) generateKubeJob(specObj interface{}) (*batchv1.Job, error) {
 		container := &pod.Spec.Containers[0]
 		container.VolumeMounts = append(container.VolumeMounts, volumeMount)
 
+		pathType := corev1.HostPathDirectory
+
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 			Name: emptyDirVolumeName,
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/netdata/src/test",
+					Type: &pathType,
+				},
 			},
 		})
 	}

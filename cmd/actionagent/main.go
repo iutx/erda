@@ -56,6 +56,7 @@ func realMain(args string) {
 	if len(os.Args) == 1 {
 		logrus.Fatal("failed to run action: no args passed in")
 	}
+	logrus.Infof("---------> 123123123123")
 	ctx, cancel := context.WithCancel(context.Background())
 	agent := &actionagent.Agent{
 		Errs:              make([]error, 0),
