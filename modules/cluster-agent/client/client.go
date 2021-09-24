@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -28,10 +29,13 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rancher/remotedialer"
+	"github.com/sirupsen/logrus"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/modules/cluster-agent/config"
 	"github.com/erda-project/erda/pkg/discover"
+	"github.com/erda-project/erda/pkg/secret"
+	"github.com/erda-project/erda/pkg/secret/hmac"
 )
 
 var connected = make(chan struct{})
@@ -80,11 +84,15 @@ func parseDialerEndpoint(clusterKey, endpoint string) (string, error) {
 }
 
 func Start(ctx context.Context, cfg *config.Config) error {
-	headers := http.Header{
-		"X-Erda-Cluster-Key": {cfg.ClusterKey},
-		// TODO: support encode with secretKey
-		"Authorization": {cfg.ClusterKey},
+	reqTime := time.Now()
+
+	r, err := http.NewRequest(http.MethodGet, cfg.ClusterDialEndpoint, nil)
+	if err != nil {
+		return fmt.Errorf("")
 	}
+
+	r.Header.Add("X-Erda-Cluster-Key", cfg.ClusterKey)
+
 	if cfg.CollectClusterInfo {
 		clusterInfo, err := getClusterInfo(cfg.K8SApiServerAddr)
 		if err != nil {
@@ -94,8 +102,19 @@ func Start(ctx context.Context, cfg *config.Config) error {
 		if err != nil {
 			return err
 		}
-		headers["X-Erda-Cluster-Info"] = []string{base64.StdEncoding.EncodeToString(bytes)}
+		r.Header.Add("X-Erda-Cluster-Info", base64.StdEncoding.EncodeToString(bytes))
 	}
+
+	asp := secret.AkSkPair{
+		AccessKeyID: cfg.AccessKey,
+		SecretKey:   cfg.SecretKey,
+	}
+
+	hm := hmac.New(asp, hmac.WithTimestamp(reqTime))
+
+	hm.SignCanonicalRequest(r)
+
+	logrus.Debugf("generate header: %v", r.Header)
 
 	ep, err := parseDialerEndpoint(cfg.ClusterKey, cfg.ClusterDialEndpoint)
 	if err != nil {
@@ -103,7 +122,7 @@ func Start(ctx context.Context, cfg *config.Config) error {
 	}
 
 	for {
-		remotedialer.ClientConnect(ctx, ep, headers, nil, func(proto, address string) bool {
+		remotedialer.ClientConnect(ctx, ep, r.Header, nil, func(proto, address string) bool {
 			switch proto {
 			case "tcp":
 				return true

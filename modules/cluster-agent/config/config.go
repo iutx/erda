@@ -19,6 +19,7 @@ type Config struct {
 	CollectClusterInfo  bool   `default:"true" desc:"enable collect cluster info"`
 	ClusterDialEndpoint string `desc:"cluster dialer endpoint"`
 	ClusterKey          string `desc:"cluster key"`
+	AccessKey           string `desc:"access key"`
 	SecretKey           string `desc:"secret key"`
 	K8SApiServerAddr    string `desc:"kube-apiserver address in cluster"`
 }
