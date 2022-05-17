@@ -5,3 +5,4 @@ cluster-agent:
   erdaNamespace: "${DICE_NAMESPACE}"
   clusterAccessKey: "${CLUSTER_ACCESS_KEY}"
   k8sApiServerAddr: "${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+  collectClusterInfo: "${COLLECT_CLUSTER_INFO}"
