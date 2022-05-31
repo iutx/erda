@@ -115,6 +115,9 @@ type Conf struct {
 
 	// k8s type executor max timeout second
 	K8SExecutorMaxInitializationSec uint64 `env:"K8S_EXECUTOR_MAX_INITIALIZATION_SEC" default:"5"`
+
+	// erda namespace
+	ErdaNamespace string `env:"DICE_NAMESPACE" default:"default"`
 }
 
 var cfg Conf
@@ -375,4 +378,8 @@ func K8SExecutorPoolSize() int {
 // K8SExecutorMaxInitializationSec k8s type executor max timeout second
 func K8SExecutorMaxInitializationSec() uint64 {
 	return cfg.K8SExecutorMaxInitializationSec
+}
+
+func ErdaNamespace() string {
+	return cfg.ErdaNamespace
 }

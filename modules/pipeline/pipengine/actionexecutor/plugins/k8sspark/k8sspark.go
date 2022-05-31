@@ -106,7 +106,7 @@ func (k *K8sSpark) Start(ctx context.Context, task *spec.PipelineTask) (data int
 	}
 
 	if err := k.createImageSecretIfNotExist(job.Namespace); err != nil {
-		return nil, fmt.Errorf("failed to create aliyun-registry image secrets, namespace: %s, err: %v", job.Namespace, err)
+		return nil, fmt.Errorf("failed to create image secrets, namespace: %s, err: %v", job.Namespace, err)
 	}
 
 	if err := k.createSparkServiceAccountIfNotExist(job.Namespace); err != nil {
