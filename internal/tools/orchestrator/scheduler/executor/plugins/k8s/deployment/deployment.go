@@ -30,14 +30,15 @@ import (
 
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/k8sapi"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/k8serror"
-	"github.com/erda-project/erda/pkg/http/httpclient"
 	"github.com/erda-project/erda/pkg/strutil"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 // Deployment is the object to manipulate k8s api of deployment
 type Deployment struct {
-	addr   string
-	client *httpclient.HTTPClient
+	cs kubernetes.Interface
 }
 
 // Option configures a Deployment
@@ -54,11 +55,10 @@ func New(options ...Option) *Deployment {
 	return ns
 }
 
-// WithCompleteParams provides an Option
-func WithCompleteParams(addr string, client *httpclient.HTTPClient) Option {
+// WithClientSet with kubernetes client set
+func WithClientSet(c kubernetes.Interface) Option {
 	return func(d *Deployment) {
-		d.addr = addr
-		d.client = client
+		d.cs = c
 	}
 }
 
@@ -113,55 +113,31 @@ func (d *Deployment) Patch(namespace, deploymentName, containerName string, snip
 
 // Create creates a k8s deployment object
 func (d *Deployment) Create(deploy *appsv1.Deployment) error {
-	var b bytes.Buffer
-
-	resp, err := d.client.Post(d.addr).
-		Path("/apis/apps/v1/namespaces/" + deploy.Namespace + "/deployments").
-		JSONBody(deploy).
-		Do().
-		Body(&b)
-
-	if err != nil {
-		return errors.Errorf("failed to create deployment, name: %s", deploy.Name)
+	if deploy == nil {
+		return errors.New("deployment is nil")
 	}
-
-	if !resp.IsOK() {
-		errMsg := fmt.Sprintf("failed to create k8s deployment statuscode: %v, body: %v",
-			resp.StatusCode(), b.String())
-		return errors.Errorf(errMsg)
+	_, err := d.cs.AppsV1().Deployments(deploy.Namespace).Create(context.Background(), deploy, metav1.CreateOptions{})
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
 // Get gets a k8s deployment object
 func (d *Deployment) Get(namespace, name string) (*appsv1.Deployment, error) {
-	var b bytes.Buffer
-	resp, err := d.client.Get(d.addr).
-		Path("/apis/apps/v1/namespaces/" + namespace + "/deployments/" + name).
-		Do().
-		Body(&b)
-
+	deploy, err := d.cs.AppsV1().Deployments(namespace).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
-		return nil, errors.Errorf("failed to get deployment info, name: %s", name)
-	}
-
-	if !resp.IsOK() {
-		if resp.IsNotfound() {
+		if k8serrors.IsNotFound(err) {
 			return nil, k8serror.ErrNotFound
 		}
-		return nil, errors.Errorf("failed to get deployment info, name: %s, statuscode: %v, body: %v",
-			name, resp.StatusCode(), b.String())
-	}
-
-	deployment := &appsv1.Deployment{}
-	if err := json.NewDecoder(&b).Decode(deployment); err != nil {
 		return nil, err
 	}
-	return deployment, nil
+	return deploy, nil
 }
 
 // List lists deployments under specific namespace
 func (d *Deployment) List(namespace string, labelSelector map[string]string) (appsv1.DeploymentList, error) {
+	fieldSelector, err :=
 	var deployList appsv1.DeploymentList
 	var params url.Values
 	if len(labelSelector) > 0 {
