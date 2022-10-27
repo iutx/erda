@@ -9,7 +9,7 @@ CREATE INDEX `idx_owner_user_id`
     ON `cmp_project_resource_daily` (owner_user_id)
 ;
 
-create table `cmp_application_resource_daily`
+create table `cmp_application_resource_dail`
 (
     `id`                       BIGINT(20)   NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT 'Primary Key',
     `created_at`               DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
