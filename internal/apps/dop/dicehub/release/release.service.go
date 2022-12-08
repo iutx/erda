@@ -1122,7 +1122,7 @@ func (s *ReleaseService) RemoveDeprecatedsReleases(now time.Time) error {
 // Convert 从ReleaseRequest中提取Release元信息, 若为应用级制品, appReleases填nil
 func (s *ReleaseService) Convert(releaseRequest *pb.ReleaseCreateRequest, appReleases []db.Release) (*db.Release, error) {
 	release := db.Release{
-		ReleaseID:        uuid.UUID(),
+		ReleaseID:        uuid.New(),
 		ReleaseName:      releaseRequest.ReleaseName,
 		Desc:             releaseRequest.Desc,
 		Dice:             releaseRequest.Dice,
@@ -1339,12 +1339,18 @@ func (s *ReleaseService) convertToReleaseResponse(release *db.Release) (*pb.Rele
 				}
 				version = extensionVersion.Version
 			}
+
+			extension, ok := extensionMap[name]
+			if !ok {
+				return nil, errors.Errorf("extension %s not found", name)
+			}
+
 			addons = append(addons, &pb.AddonInfo{
-				DisplayName: extensionMap[name].DisplayName,
+				DisplayName: extension.DisplayName,
 				Plan:        plan,
 				Version:     version,
-				Category:    extensionMap[name].Category,
-				LogoURL:     extensionMap[name].LogoUrl,
+				Category:    extension.Category,
+				LogoURL:     extension.LogoUrl,
 			})
 		}
 		logrus.Infoln("[DEBUG] end make addon info")

@@ -106,8 +106,7 @@ func WithCMDB() Option {
 func WithErdaServer() Option {
 	return func(b *Bundle) {
 		k := discover.EnvErdaServer
-		v := os.Getenv(k)
-		b.urls.Put(k, v)
+		b.urls.Put(k, "192.168.130.20:9095")
 	}
 }
 

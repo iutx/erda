@@ -697,3 +697,7 @@ func Test_PutOffRelease(t *testing.T) {
 		})
 	}
 }
+
+func Test_convertToReleaseResponse(t *testing.T) {
+
+}

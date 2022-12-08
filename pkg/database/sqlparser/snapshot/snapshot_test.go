@@ -16,6 +16,8 @@ package snapshot_test
 
 import (
 	"bytes"
+	"fmt"
+
 	"os"
 	"strings"
 	"testing"
@@ -23,6 +25,9 @@ import (
 	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/parser/format"
 	_ "github.com/pingcap/tidb/types/parser_driver"
+	driverMysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/pingcap/parser"
 
@@ -242,4 +247,23 @@ func TestCharsetWhite(t *testing.T) {
 	if len(white) != 1 || white[0] != "utf8mb4" {
 		t.Fatal("utf8mb4 is set", white)
 	}
+}
+
+const (
+	dsn = "root:@tcp(frp-k8s.frp-system.svc.cluster.local:10170)/erda?charset=utf8mb4&parseTime=True&loc=Local"
+)
+
+func Test_From(t *testing.T) {
+	db, err := gorm.Open(driverMysql.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	result, err := snapshot.From(db)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(result)
 }
