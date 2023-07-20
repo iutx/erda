@@ -80,12 +80,31 @@ type MysqlSpec struct {
 	//+optional
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
+	// List of sources to populate environment variables in the container.
+	// The keys defined within a source must be a C_IDENTIFIER. All invalid keys
+	// will be reported as an event when the container is starting. When a key exists in multiple
+	// sources, the value associated with the last source will take precedence.
+	// Values defined by an Env with a duplicate key will take precedence.
+	// Cannot be updated.
+	// +optional
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty" protobuf:"bytes,19,rep,name=envFrom"`
+	// List of environment variables to set in the container.
+	// Cannot be updated.
+	// +optional
+	// +patchMergeKey=name
+	// +patchStrategy=merge
+	Env []corev1.EnvVar `json:"env,omitempty" patchStrategy:"merge" patchMergeKey:"name" protobuf:"bytes,7,rep,name=env"`
+
 	//+kubebuilder:default=3306
 	//+optional
 	Port int `json:"port,omitempty"`
 	//+kubebuilder:default=33080
 	//+optional
 	MyletPort int `json:"myletPort,omitempty"`
+	//+kubebuilder:default=ClusterIP
+	//+kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
+	//+optional
+	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 
 	//+kubebuilder:default=/mydir
 	//+optional

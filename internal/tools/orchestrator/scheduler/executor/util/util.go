@@ -17,6 +17,7 @@ package util
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -361,4 +362,13 @@ func GetDiceWorkspaceFromEnvs(envs map[string]string) (apistructs.DiceWorkspace,
 	} else {
 		return "", errors.New("not found workspace env")
 	}
+}
+
+func GetAddonPublicRegistry() string {
+	registry, ok := os.LookupEnv("ADDON_PUBLIC_REGISTRY")
+	if ok {
+		return registry
+	}
+
+	return "registry.erda.cloud"
 }

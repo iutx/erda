@@ -16,14 +16,19 @@ package rocketmq
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	rocketmqv1alpha1 "erda.cloud/rocketmq/api/v1alpha1"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon"
@@ -46,6 +51,7 @@ var (
 )
 
 type RocketMQOperator struct {
+	cs          kubernetes.Interface
 	k8s         addon.K8SUtil
 	ns          addon.NamespaceUtil
 	client      *httpclient.HTTPClient
@@ -53,8 +59,9 @@ type RocketMQOperator struct {
 	statefulset addon.StatefulsetUtil
 }
 
-func New(k8s addon.K8SUtil, ns addon.NamespaceUtil, client *httpclient.HTTPClient, overcommit addon.OvercommitUtil, sts addon.StatefulsetUtil) *RocketMQOperator {
+func New(cs kubernetes.Interface, k8s addon.K8SUtil, ns addon.NamespaceUtil, client *httpclient.HTTPClient, overcommit addon.OvercommitUtil, sts addon.StatefulsetUtil) *RocketMQOperator {
 	return &RocketMQOperator{
+		cs:          cs,
 		k8s:         k8s,
 		ns:          ns,
 		client:      client,
@@ -144,6 +151,77 @@ func (r *RocketMQOperator) Create(k8syml interface{}) error {
 			return err
 		}
 	}
+
+	// node port patch
+	rocketMQ.Spec.BrokerSpec.HostNetwork = true
+
+	// Create Service NodePort
+	fakeName := "rocketmq-broker-fake-np"
+	brokerFakeSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fakeName,
+			Namespace: rocketMQ.Namespace,
+			Labels: map[string]string{
+				apistructs.ServiceTypeLabel: apistructs.ServiceTypeNodePort,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:     "fake",
+					Protocol: corev1.ProtocolTCP,
+					Port:     10911,
+					TargetPort: intstr.IntOrString{
+						IntVal: 10911,
+					},
+				},
+			},
+			Selector: map[string]string{
+				"app": "rocketmq-broker",
+			},
+			Type: corev1.ServiceTypeNodePort,
+		},
+	}
+
+	fakeSvc, err := r.cs.CoreV1().Services(rocketMQ.Namespace).Create(context.Background(), brokerFakeSvc, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("rocketmq-nodeport failed to create fake nodeport, error: %v", err)
+	}
+	defer func() {
+		_ = r.cs.CoreV1().Services(rocketMQ.Namespace).Delete(context.Background(), fakeSvc.Name, metav1.DeleteOptions{})
+	}()
+
+	envs := []corev1.EnvVar{
+		{
+			Name:  "EXTERNAL_ENABLED",
+			Value: "true",
+		},
+		{
+			Name:  "EXTERNAL_PORT",
+			Value: strconv.Itoa(int(fakeSvc.Spec.Ports[0].NodePort)),
+		},
+		{
+			Name: "HOST_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					APIVersion: "v1",
+					FieldPath:  "status.hostIP",
+				},
+			},
+		},
+		{
+			Name: "POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					APIVersion: "v1",
+					FieldPath:  "metadata.name",
+				},
+			},
+		},
+	}
+
+	rocketMQ.Spec.BrokerSpec.Env = append(rocketMQ.Spec.BrokerSpec.Env, envs...)
+
 	var b bytes.Buffer
 	resp, err := r.client.Post(r.k8s.GetK8SAddr()).
 		Path(fmt.Sprintf("/apis/addons.erda.cloud/v1alpha1/namespaces/%s/rocketmqs", rocketMQ.Namespace)).
@@ -158,6 +236,36 @@ func (r *RocketMQOperator) Create(k8syml interface{}) error {
 			rocketMQ.Namespace, rocketMQ.Name, resp.StatusCode(), b.String())
 	}
 
+	_, err = r.cs.CoreV1().Services(rocketMQ.Namespace).Create(context.Background(), &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rocketmq-namesrv-np",
+			Namespace: rocketMQ.Namespace,
+			Labels: map[string]string{
+				"app":                       "rocketmq-namesrv",
+				apistructs.ServiceTypeLabel: apistructs.ServiceTypeNodePort,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:     "namesrv",
+					Protocol: corev1.ProtocolTCP,
+					Port:     9876,
+					TargetPort: intstr.IntOrString{
+						IntVal: 9876,
+					},
+				},
+			},
+			Selector: map[string]string{
+				"app": "rocketmq-namesrv",
+			},
+			Type: corev1.ServiceTypeNodePort,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("rocketmq-nodeport failed to create namesrv service: %v", err)
+	}
+
 	return nil
 }
 
@@ -168,6 +276,7 @@ func (r *RocketMQOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Ser
 	}
 	var rocketMQService *apistructs.Service
 	var consoleService *apistructs.Service
+	var brockerService *apistructs.Service
 	for i := range sg.Services {
 		if sg.Services[i].Name == svcNameSrv {
 			rocketMQService = &sg.Services[i]
@@ -175,7 +284,83 @@ func (r *RocketMQOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Ser
 		if sg.Services[i].Name == svcConsole {
 			consoleService = &sg.Services[i]
 		}
+		if sg.Services[i].Name == svcBroker {
+			brockerService = &sg.Services[i]
+		}
 	}
+
+	{
+		for _, svc := range []string{svcNameSrv, svcBroker, svcConsole} {
+			pods, err := r.cs.CoreV1().Pods(rocketMQ.Namespace).List(context.Background(), metav1.ListOptions{
+				LabelSelector: labels.FormatLabels(map[string]string{
+					"app": svc,
+				}),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("rocketmq-nodeport failed to list service %s pod, error: %v", svc, err)
+			}
+
+			for _, item := range pods.Items {
+				if item.Status.HostIP == "" {
+					return nil, fmt.Errorf("rocketmq-nodeport service %s/%s pod %s is not ready, next cycle check",
+						svc, item.Namespace, item.Name)
+				}
+				switch svc {
+				case svcNameSrv:
+					if rocketMQService == nil {
+						return nil, fmt.Errorf("rocketmq-nodeport service group %s is nil", svcNameSrv)
+					}
+
+					if rocketMQService.ExternalEndpoint == nil {
+						rocketMQService.ExternalEndpoint = &apistructs.ExternalEndpoint{
+							Hosts: make([]string, 0),
+							Ports: make([]int32, 0),
+						}
+					}
+					rocketMQService.ExternalEndpoint.Hosts = append(rocketMQService.ExternalEndpoint.Hosts, item.Status.HostIP)
+					svcNp, err := r.cs.CoreV1().Services(rocketMQ.Namespace).Get(context.Background(), "rocketmq-namesrv-np", metav1.GetOptions{})
+					if err != nil {
+						return nil, fmt.Errorf("rocketmq-nodeport failed to get namesrv nodeport, err: %v", err)
+					}
+					if len(svcNp.Spec.Ports) == 0 {
+						return nil, fmt.Errorf("rocketmq-nodeport failed to get namesrv ports, count: 0")
+					}
+
+					nodePort := svcNp.Spec.Ports[0].NodePort
+					if nodePort == 0 {
+						return nil, fmt.Errorf("rocketmq-nodeport failed to get namesrv node ports, count: 0")
+					}
+
+					rocketMQService.ExternalEndpoint.Ports = append(rocketMQService.ExternalEndpoint.Ports, nodePort)
+				case svcBroker:
+					if brockerService == nil {
+						return nil, fmt.Errorf("rocketmq-nodeport service group %s is nil", svcNameSrv)
+					}
+
+					if brockerService.ExternalEndpoint == nil {
+						brockerService.ExternalEndpoint = &apistructs.ExternalEndpoint{
+							Hosts: make([]string, 0),
+							Ports: make([]int32, 0),
+						}
+					}
+					brockerService.ExternalEndpoint.Hosts = append(brockerService.ExternalEndpoint.Hosts, item.Status.HostIP)
+				case svcConsole:
+					if consoleService == nil {
+						return nil, fmt.Errorf("rocketmq-nodeport service group %s is nil", svcNameSrv)
+					}
+
+					if consoleService.ExternalEndpoint == nil {
+						consoleService.ExternalEndpoint = &apistructs.ExternalEndpoint{
+							Hosts: make([]string, 0),
+							Ports: make([]int32, 0),
+						}
+					}
+					consoleService.ExternalEndpoint.Hosts = append(consoleService.ExternalEndpoint.Hosts, item.Status.HostIP)
+				}
+			}
+		}
+	}
+
 	rocketMQService.Vip = strutil.Join([]string{rocketMQ.Spec.NameServiceSpec.Name, rocketMQ.Namespace, "svc.cluster.local"}, ".")
 	consoleService.Vip = strutil.Join([]string{rocketMQ.Spec.ConsoleSpec.Name, rocketMQ.Namespace, "svc.cluster.local"}, ".")
 	switch rocketMQ.Status.ConditionStatus {

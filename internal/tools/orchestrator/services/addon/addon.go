@@ -1393,7 +1393,11 @@ func (a *Addon) Get(userID, orgID, routingInstanceID string, internalcall bool) 
 						logrus.Errorf("mysql password decript err, %v", err)
 						return nil, err
 					}
-					config[k] = decPwd
+					if k == apistructs.AddonRedisPasswordName && decPwd == apistructs.AddonRedisEmptyPassword {
+						delete(config, k)
+					} else {
+						config[k] = decPwd
+					}
 				} else {
 					if _, ok := config[apistructs.AddonPasswordHasEncripy]; ok {
 						decPwd, err := a.DecryptPassword(nil, password)

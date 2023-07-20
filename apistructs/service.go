@@ -313,6 +313,8 @@ type Service struct {
 	// only exists if serviceDiscoveryKind is PROXY
 	// can not modify directly, assigned by dice
 	ProxyIp string `json:"proxyIp,omitempty"`
+	// Store external endpoints, e.g. kubernetes NodePort
+	ExternalEndpoint *ExternalEndpoint `json:"externalEndpoints,omitempty"`
 	// TODO: refactor it, currently only work with label X_ENABLE_PUBLIC_IP=true
 	PublicIp string `json:"publicIp,omitempty"`
 	// instances of containers should running
@@ -379,6 +381,11 @@ type Resources struct {
 
 	// network
 	Network PodNetwork `json:"network,omitempty"`
+}
+
+type ExternalEndpoint struct {
+	Hosts []string `json:"hosts"`
+	Ports []int32  `json:"ports"`
 }
 
 // health check to check container healthy

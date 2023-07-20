@@ -15,11 +15,18 @@
 package k8s
 
 import (
+	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/clusterinfo"
@@ -324,6 +331,35 @@ func (k *Kubernetes) createStatefulService(sg *apistructs.ServiceGroup) error {
 		return err
 	}
 
+	k8sSvc.Name = fmt.Sprintf("%s-np", k8sSvc.Name)
+	k8sSvc.Labels["DICE_SERVICE_TYPE"] = "node-port"
+	k8sSvc.Spec.Type = corev1.ServiceTypeNodePort
+
+	if strings.Contains(k8sSvc.Name, "kafka") && k8sSvc.Spec.Ports[0].Port == 9092 {
+		k8sSvc.Spec.Ports[0].Port = 9093
+		k8sSvc.Spec.Ports[0].TargetPort = intstr.FromInt(9093)
+	}
+
+	if strings.Contains(k8sSvc.Name, "kafka") {
+		logrus.Infof("kafka-nodeport, service count: %d", len(sg.Services))
+		for i, _ := range sg.Services {
+			stsLabelVal := fmt.Sprintf("kafka-cluster-%d", i)
+			k8sSvc.Name = fmt.Sprintf("%s-np", stsLabelVal)
+			k8sSvc.Spec.Selector["statefulset.kubernetes.io/pod-name"] = stsLabelVal
+			_, err := k.k8sClient.ClientSet.CoreV1().Services(svc.Namespace).Create(context.Background(), k8sSvc, metav1.CreateOptions{})
+			if err != nil && !k8serrors.IsAlreadyExists(err) {
+				logrus.Errorf("failed to create NodePort service %s, %v", k8sSvc.Name, err)
+				return err
+			}
+		}
+	} else {
+		_, err := k.k8sClient.ClientSet.CoreV1().Services(svc.Namespace).Create(context.Background(), k8sSvc, metav1.CreateOptions{})
+		if err != nil {
+			logrus.Errorf("failed to create NodePort service %s, %v", k8sSvc.Name, err)
+			return err
+		}
+	}
+
 	ing, err := ingress.New(k.k8sClient.ClientSet)
 	if err != nil {
 		logrus.Errorf("failed to create ingress helper, err: %v", err)
@@ -429,11 +465,110 @@ func (k *Kubernetes) inspectOne(g *apistructs.ServiceGroup, namespace, name stri
 		envs[env.Name] = env.Value
 	}
 
+	// TODO: addon id
+	svcList, err := k.k8sClient.ClientSet.CoreV1().Services(namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: "DICE_SERVICE_TYPE=node-port",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var kafkaInstanceNp []int32
+
+	nodePorts := make([][]int32, 0)
+	for _, item := range svcList.Items {
+		itemPorts := make([]int32, 0)
+		for _, port := range item.Spec.Ports {
+			if port.NodePort == 0 {
+				continue
+			}
+			if port.Port == 9093 {
+				if strings.Contains(item.Name, "kafka-cluster") {
+					kafkaInstanceNp = append(kafkaInstanceNp, port.NodePort)
+				}
+
+			}
+			itemPorts = append(itemPorts, port.NodePort)
+		}
+		nodePorts = append(nodePorts, itemPorts)
+	}
+
+	if strings.Contains(set.Name, "kafka-cluster") {
+		logrus.Info("kafka-nodeport cluster patch")
+		for _, c := range set.Spec.Template.Spec.Containers {
+			if c.Name != "kafka-cluster" {
+				continue
+			}
+			npExists := false
+			for _, envVar := range c.Env {
+				if strings.Contains(envVar.Name, "EXTERNAL_NODE_PORT") {
+					npExists = true
+				}
+			}
+			logrus.Infof("kafka-nodeport kafka cluster env EXTERNAL_NODE_PORT exists: %v", npExists)
+			if !npExists {
+				logrus.Info("kafka-nodeport patching")
+
+				newSet, err := k.k8sClient.ClientSet.AppsV1().StatefulSets(namespace).Get(context.Background(), set.Name, metav1.GetOptions{})
+				if err != nil {
+					logrus.Errorf("kafka-nodeport get sts, err: %v", err)
+					return nil, err
+				}
+
+				if len(kafkaInstanceNp) != 0 {
+					for i, v := range kafkaInstanceNp {
+						newSet.Spec.Template.Spec.Containers[0].Env = append(newSet.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+							Name:  fmt.Sprintf("N%d_EXTERNAL_NODE_PORT", i),
+							Value: strconv.Itoa(int(v)),
+						})
+					}
+				}
+
+				newSet.ResourceVersion = ""
+				_, err = k.k8sClient.ClientSet.AppsV1().StatefulSets(namespace).Update(context.Background(), newSet, metav1.UpdateOptions{})
+				if err != nil {
+					logrus.Errorf("kafka-nodeport update sts, err: %v", err)
+					return nil, err
+				}
+
+				return nil, fmt.Errorf("kafka-nodeport updated, check next cycle")
+			}
+		}
+	}
+
 	for i := 0; i < int(replica); i++ {
 		podName := strutil.Concat(container.Name, "-", strconv.Itoa(i))
 		pod, err := k.pod.Get(namespace, podName)
 		if err != nil && err != k8serror.ErrNotFound {
 			return nil, err
+		}
+		if pod != nil && strings.Contains(container.Name, "kafka-cluster") {
+			npExists := false
+			for _, envVar := range pod.Spec.Containers[0].Env {
+				if strings.Contains(envVar.Name, "EXTERNAL_NODE_PORT") {
+					npExists = true
+				}
+			}
+			if !npExists {
+				pods, err := k.k8sClient.ClientSet.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
+					LabelSelector: labels.FormatLabels(map[string]string{
+						"ADDON_GROUP_ID": "kafka-cluster",
+					}),
+				})
+				if err != nil {
+					return nil, err
+				}
+				logrus.Infof("kafka-nodeport get %s/pods %d", namespace, len(pods.Items))
+
+				if err := k.k8sClient.ClientSet.CoreV1().Pods(namespace).DeleteCollection(context.Background(), metav1.DeleteOptions{}, metav1.ListOptions{
+					LabelSelector: labels.FormatLabels(map[string]string{
+						"ADDON_GROUP_ID": "kafka-cluster",
+					}),
+				}); err != nil {
+					logrus.Errorf("failed to delete pods: %v", err)
+					return nil, errors.New("failed to delete pods, error: " + err.Error())
+				}
+			}
 		}
 		key := strutil.Concat("G", strconv.Itoa(groupNum), "_N", strconv.Itoa(i))
 		serviceName, ok := set.Annotations[key]
@@ -460,7 +595,7 @@ func (k *Kubernetes) inspectOne(g *apistructs.ServiceGroup, namespace, name stri
 			lastMsg = msgList[len(msgList)-1].Comment
 		}
 
-		sg.Services = append(sg.Services, apistructs.Service{
+		replicaService := apistructs.Service{
 			Name:     serviceName,
 			Vip:      strutil.Concat(name, ".", namespace, ".svc.cluster.local"),
 			ShortVIP: name,
@@ -471,7 +606,29 @@ func (k *Kubernetes) inspectOne(g *apistructs.ServiceGroup, namespace, name stri
 			},
 			Image:         container.Image,
 			InstanceInfos: []apistructs.InstanceInfo{{Ip: podIP}},
-		})
+		}
+
+		if pod != nil && pod.Status.HostIP != "" {
+			logrus.Infof("inspect pod, name: %s/%s, host ip: %s", pod.Namespace, pod.Name, pod.Status.HostIP)
+		}
+
+		if pod != nil && pod.Status.HostIP != "" {
+			targetPort := make([]int32, 0)
+			if len(nodePorts) == 1 {
+				targetPort = nodePorts[0]
+			} else if len(nodePorts) > groupNum {
+				targetPort = nodePorts[groupNum]
+			}
+			if pod != nil && strings.Contains(container.Name, "kafka-cluster") {
+				targetPort = nodePorts[i]
+			}
+			replicaService.ExternalEndpoint = &apistructs.ExternalEndpoint{
+				Hosts: []string{pod.Status.HostIP},
+				Ports: targetPort,
+			}
+		}
+
+		sg.Services = append(sg.Services, replicaService)
 	}
 
 	sg.Status = apistructs.StatusReady

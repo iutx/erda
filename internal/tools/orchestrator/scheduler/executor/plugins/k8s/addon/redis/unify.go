@@ -15,6 +15,8 @@
 package redis
 
 import (
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon/redis/legacy"
@@ -27,7 +29,9 @@ type UnifiedRedisOperator struct {
 	useLegacy           bool
 }
 
-func New(k8sutil addon.K8SUtil,
+func New(
+	cs kubernetes.Interface,
+	k8sutil addon.K8SUtil,
 	deploy addon.DeploymentUtil,
 	sts addon.StatefulsetUtil,
 	service addon.ServiceUtil,
@@ -36,7 +40,7 @@ func New(k8sutil addon.K8SUtil,
 	secret addon.SecretUtil,
 	client *httpclient.HTTPClient) *UnifiedRedisOperator {
 	return &UnifiedRedisOperator{
-		redisoperator:       NewRedisOperator(k8sutil, deploy, sts, service, ns, overcommit, secret, client),
+		redisoperator:       NewRedisOperator(cs, k8sutil, deploy, sts, service, ns, overcommit, secret, client),
 		legacyRedisoperator: legacy.New(k8sutil, deploy, sts, service, ns, overcommit, client),
 		useLegacy:           false,
 	}

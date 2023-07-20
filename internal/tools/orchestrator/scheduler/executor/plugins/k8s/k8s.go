@@ -451,18 +451,18 @@ func New(name executortypes.Name, clusterName string, options map[string]string)
 		k.istioEngine = istioEngine
 	}
 
-	elasticsearchoperator := elasticsearch.New(k, sts, ns, svc, k, k8ssecret, k, client)
+	elasticsearchoperator := elasticsearch.New(k.k8sClient.ClientSet, k, sts, ns, svc, k, k8ssecret, k, client)
 	k.elasticsearchoperator = elasticsearchoperator
-	redisoperator := redis.New(k, deploy, sts, svc, ns, k, k8ssecret, client)
+	redisoperator := redis.New(k.k8sClient.ClientSet, k, deploy, sts, svc, ns, k, k8ssecret, client)
 	k.redisoperator = redisoperator
-	mysqloperator := mysql.New(k, ns, k8ssecret, pvc, client)
+	mysqloperator := mysql.New(k.k8sClient.ClientSet, k, ns, k8ssecret, pvc, client)
 	k.mysqloperator = mysqloperator
-	canaloperator := canal.New(k, ns, k8ssecret, pvc, client)
+	canaloperator := canal.New(k.k8sClient.ClientSet, k, ns, k8ssecret, pvc, client)
 	k.canaloperator = canaloperator
 	daemonsetoperator := daemonset.New(k, ns, k, k, ds, k)
 	k.daemonsetoperator = daemonsetoperator
 	k.sourcecovoperator = sourcecov.New(k, client, k, ns)
-	rocketmqoperator := rocketmq.New(k, ns, client, k, sts)
+	rocketmqoperator := rocketmq.New(k.k8sClient.ClientSet, k, ns, client, k, sts)
 	k.rocketmqoperator = rocketmqoperator
 	return k, nil
 }

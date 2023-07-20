@@ -16,6 +16,7 @@ package elasticsearch
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -25,15 +26,19 @@ import (
 	"github.com/sirupsen/logrus"
 	apiv1 "k8s.io/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/k8sapi"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/k8serror"
+	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/util"
 	"github.com/erda-project/erda/pkg/http/httpclient"
 	"github.com/erda-project/erda/pkg/parser/diceyml"
 	"github.com/erda-project/erda/pkg/schedule/schedulepolicy/constraintbuilders"
@@ -46,6 +51,7 @@ var (
 )
 
 type ElasticsearchOperator struct {
+	cs          kubernetes.Interface
 	k8s         addon.K8SUtil
 	statefulset addon.StatefulsetUtil
 	ns          addon.NamespaceUtil
@@ -56,7 +62,9 @@ type ElasticsearchOperator struct {
 	client      *httpclient.HTTPClient
 }
 
-func New(k8s addon.K8SUtil,
+func New(
+	cs kubernetes.Interface,
+	k8s addon.K8SUtil,
 	sts addon.StatefulsetUtil,
 	ns addon.NamespaceUtil,
 	service addon.ServiceUtil,
@@ -73,6 +81,7 @@ func New(k8s addon.K8SUtil,
 		secret:      secret,
 		imageSecret: imageSecret,
 		client:      client,
+		cs:          cs,
 	}
 }
 
@@ -206,7 +215,63 @@ func (eo *ElasticsearchOperator) Create(k8syml interface{}) error {
 	if err := eo.createMetricSvcIfNotExist(elasticsearch); err != nil {
 		return err
 	}
+
+	for _, npName := range eo.getNodePortServiceNames(elasticsearch.Name) {
+		labels := map[string]string{
+			"common.k8s.elastic.co/type":                "elasticsearch",
+			"elasticsearch.k8s.elastic.co/cluster-name": elasticsearch.Name,
+		}
+
+		// Create Service NodePort
+		npService := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      npName,
+				Namespace: elasticsearch.Namespace,
+				Labels:    labels,
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: labels,
+				Type:     corev1.ServiceTypeNodePort,
+			},
+		}
+
+		if strings.Contains(npName, "http") {
+			npService.Spec.Ports = []corev1.ServicePort{
+				{
+					Name:     "http",
+					Protocol: corev1.ProtocolTCP,
+					Port:     9200,
+					TargetPort: intstr.IntOrString{
+						IntVal: 9200,
+					},
+				},
+			}
+		} else if strings.Contains(npName, "transport") {
+			npService.Spec.Ports = []corev1.ServicePort{
+				{
+					Name:     "tls-transport",
+					Protocol: corev1.ProtocolTCP,
+					Port:     9300,
+					TargetPort: intstr.IntOrString{
+						IntVal: 9300,
+					},
+				},
+			}
+		}
+
+		_, err := eo.cs.CoreV1().Services(elasticsearch.Namespace).Create(context.Background(), npService, metav1.CreateOptions{})
+		if err != nil && !k8serrors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create elasticsearch %s/%s node port service, %v", elasticsearch.Namespace, npName, err)
+		}
+	}
+
 	return nil
+}
+
+func (eo *ElasticsearchOperator) getNodePortServiceNames(esName string) []string {
+	httpNpName := fmt.Sprintf("%s-es-http-np", esName)
+	transPortNpName := fmt.Sprintf("%s-es-transport-np", esName)
+	return []string{httpNpName, transPortNpName}
 }
 
 func (eo *ElasticsearchOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.ServiceGroup, error) {
@@ -222,6 +287,11 @@ func (eo *ElasticsearchOperator) Inspect(sg *apistructs.ServiceGroup) (*apistruc
 	if sg.Services[0].Name == "elasticsearch" {
 		elasticsearch = &(sg.Services[0])
 	}
+
+	externalEps := &apistructs.ExternalEndpoint{
+		Ports: make([]int32, 2),
+	}
+
 	for _, sts := range stslist.Items {
 		if sts.Spec.Replicas == nil {
 			elasticsearch.Status = apistructs.StatusUnknown
@@ -232,11 +302,65 @@ func (eo *ElasticsearchOperator) Inspect(sg *apistructs.ServiceGroup) (*apistruc
 		}
 	}
 
+	podList, err := eo.cs.CoreV1().Pods(genK8SNamespace(sg.Type, sg.ID)).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labels.FormatLabels(map[string]string{
+			"elasticsearch.k8s.elastic.co/cluster-name": sg.ID,
+		}),
+	})
+	if err != nil {
+		logrus.Errorf("failed to list elasticsearch pod, err: %v", err)
+		return nil, err
+	}
+
+	logrus.Infof("es-nodeport, namespace: %s, get pods: %d", genK8SNamespace(sg.Type, sg.ID), len(podList.Items))
+
+	nodes := make([]string, 0, len(podList.Items))
+	for _, pod := range podList.Items {
+		if pod.Spec.NodeName == "" {
+			continue
+		}
+		nodes = append(nodes, pod.Spec.NodeName)
+	}
+
+	logrus.Infof("es-nodeport, get nodes: %+v", nodes)
+	for _, node := range nodes {
+		if n, err := eo.cs.CoreV1().Nodes().Get(context.Background(), node, metav1.GetOptions{}); err != nil {
+			logrus.Errorf("failed to get node %s, err: %v", node, err)
+			return nil, err
+		} else {
+			nodeIP := ""
+			for _, addr := range n.Status.Addresses {
+				if addr.Type == corev1.NodeInternalIP {
+					nodeIP = addr.Address
+				}
+			}
+			if nodeIP == "" {
+				return nil, fmt.Errorf("node %s can't get internal ip", n.Name)
+			}
+			externalEps.Hosts = append(externalEps.Hosts, nodeIP)
+		}
+	}
+
 	for _, svc := range svclist.Items {
 		if strings.Contains(svc.Name, "es-http") {
 			elasticsearch.Vip = strutil.Join([]string{svc.Name, svc.Namespace, "svc.cluster.local"}, ".")
 		}
+
+		if strings.Contains(svc.Name, "http-np") {
+			if svc.Spec.Ports[0].NodePort != 0 {
+				externalEps.Ports[0] = svc.Spec.Ports[0].NodePort
+			}
+		}
+
+		if strings.Contains(svc.Name, "transport-np") {
+			if svc.Spec.Ports[0].NodePort != 0 {
+				externalEps.Ports[1] = svc.Spec.Ports[0].NodePort
+			}
+		}
 	}
+
+	elasticsearch.ExternalEndpoint = externalEps
+	logrus.Infof("es-nodeport, get external endpoints: %+v", externalEps)
 
 	if elasticsearch.Status == apistructs.StatusHealthy {
 		sg.Status = apistructs.StatusHealthy
@@ -378,7 +502,7 @@ func (eo *ElasticsearchOperator) NodeSetsConvert(sg *apistructs.ServiceGroup, sc
 						},
 					}, {
 						Name:    "es-exporter",
-						Image:   "quay.io/prometheuscommunity/elasticsearch-exporter:v1.5.0",
+						Image:   util.GetAddonPublicRegistry() + "/prometheuscommunity/elasticsearch-exporter:v1.5.0",
 						Command: []string{"/bin/elasticsearch_exporter", esUri},
 						Ports: []corev1.ContainerPort{
 							{

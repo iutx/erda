@@ -32,6 +32,7 @@ import (
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/dbclient"
+	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/util"
 	"github.com/erda-project/erda/pkg/kms/kmstypes"
 	"github.com/erda-project/erda/pkg/parser/diceyml"
 	"github.com/erda-project/erda/pkg/strutil"
@@ -117,6 +118,14 @@ func (a *Addon) MySQLDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup
 			if valueItem.Name == masterName.Value {
 				configMap[apistructs.AddonMysqlHostName] = valueItem.Vip
 				configMap[apistructs.AddonMysqlPortName] = apistructs.AddonMysqlDefaultPort
+				if externalEp := valueItem.ExternalEndpoint; externalEp != nil {
+					configMap[apistructs.AddonMysqlExternalHostName] = externalEp.Hosts[0]
+					if len(externalEp.Hosts) > 1 {
+						configMap[apistructs.AddonMysqlExternalHostName+"2"] = externalEp.Hosts[1]
+					}
+					configMap[apistructs.AddonMysqlExternalWritePortName] = strconv.Itoa(int(externalEp.Ports[0]))
+					configMap[apistructs.AddonMysqlExternalReadPortName] = strconv.Itoa(int(externalEp.Ports[1]))
+				}
 				break
 			}
 		}
@@ -216,6 +225,11 @@ func (a *Addon) MySQLDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup
 			if valueItem.Name == masterName.Value {
 				configMap[apistructs.AddonMysqlHostName] = valueItem.Vip
 				configMap[apistructs.AddonMysqlPortName] = apistructs.AddonMysqlDefaultPort
+				if externalEp := valueItem.ExternalEndpoint; externalEp != nil {
+					configMap[apistructs.AddonMysqlExternalHostName] = externalEp.Hosts[0]
+					configMap[apistructs.AddonMysqlExternalWritePortName] = strconv.Itoa(int(externalEp.Ports[0]))
+					configMap[apistructs.AddonMysqlExternalReadPortName] = strconv.Itoa(int(externalEp.Ports[1]))
+				}
 				continue
 			}
 			configMap[apistructs.AddonMysqlSlaveHostName] = valueItem.Vip
@@ -235,6 +249,16 @@ func (a *Addon) CanalDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup
 	for _, valueItem := range serviceGroup.Dice.Services {
 		configMap[apistructs.AddonCanalHostName] = valueItem.Vip
 		configMap[apistructs.AddonCanalPortName] = apistructs.AddonCanalDefaultPort
+		if externalEp := valueItem.ExternalEndpoint; externalEp != nil {
+			hostKey := apistructs.AddonCanalExternalHostName
+			for i, host := range externalEp.Hosts {
+				if i != 0 {
+					hostKey = fmt.Sprintf("%s%d", apistructs.AddonCanalExternalHostName, i+1)
+				}
+				configMap[hostKey] = host
+			}
+			configMap[apistructs.AddonCanalExternalPortName] = strconv.Itoa(int(externalEp.Ports[0]))
+		}
 		break
 	}
 	return configMap, nil
@@ -245,16 +269,43 @@ func (a *Addon) EsDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup *a
 	configMap := map[string]string{}
 	password, _ := a.db.GetByInstanceIDAndField(addonIns.ID, apistructs.AddonESPasswordKey)
 
-	// 单节点情况
-	if len(serviceGroup.Services) >= 1 {
-		configMap[apistructs.AddonEsHostName] = serviceGroup.Services[0].Vip
-		configMap[apistructs.AddonEsPortName] = apistructs.AddonEsDefaultPort
-		if password != nil {
-			configMap[apistructs.AddonEsPasswordName] = password.Value
-			configMap[apistructs.AddonEsUserName] = apistructs.AddonESDefaultUser
-		}
-		configMap[apistructs.AddonEsTCPPortName] = apistructs.AddonEsDefaultTcpPort
+	useOperator := true
+	if len(serviceGroup.Services) > 1 {
+		useOperator = false
 	}
+
+	for index, service := range serviceGroup.Services {
+		if index == 0 {
+			oneService := service
+			configMap[apistructs.AddonEsHostName] = oneService.Vip
+			configMap[apistructs.AddonEsPortName] = apistructs.AddonEsDefaultPort
+			if password != nil {
+				configMap[apistructs.AddonEsPasswordName] = password.Value
+				configMap[apistructs.AddonEsUserName] = apistructs.AddonESDefaultUser
+			}
+			configMap[apistructs.AddonEsTCPPortName] = apistructs.AddonEsDefaultTcpPort
+			if oneService.ExternalEndpoint != nil {
+				logrus.Infof("es nodeport %+v", oneService.ExternalEndpoint)
+				for i, host := range oneService.ExternalEndpoint.Hosts {
+					hostName := apistructs.AddonEsExternalHostName
+					if i != 0 {
+						hostName = fmt.Sprintf("%s%d", apistructs.AddonEsExternalHostName, i+1)
+					}
+					configMap[hostName] = host
+				}
+				configMap[apistructs.AddonEsExternalHttpPortName] = strconv.Itoa(int(oneService.ExternalEndpoint.Ports[0]))
+				configMap[apistructs.AddonEsExternalTransportPortName] = strconv.Itoa(int(oneService.ExternalEndpoint.Ports[1]))
+			}
+		}
+		if !useOperator && service.ExternalEndpoint != nil {
+			hostName := apistructs.AddonEsExternalHostName
+			if index != 0 {
+				hostName = fmt.Sprintf("%s%d", apistructs.AddonEsExternalHostName, index+1)
+			}
+			configMap[hostName] = service.ExternalEndpoint.Hosts[0]
+		}
+	}
+
 	configMap["CLUSTER_NAME"] = addonIns.ID
 	return configMap, nil
 }
@@ -262,8 +313,18 @@ func (a *Addon) EsDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup *a
 // KafkaDeployStatus kafka状态拉取
 func (a *Addon) KafkaDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup *apistructs.ServiceGroup, clusterInfo *apistructs.ClusterInfoData) (map[string]string, error) {
 	configMap := map[string]string{}
-	var kafkaHost []string
-	for index, value := range serviceGroup.Services {
+	var (
+		kafkaHost         []string
+		kafkaExternalHost []string
+	)
+	index := 0
+	for _, value := range serviceGroup.Services {
+		if value.ExternalEndpoint != nil {
+			if res, err := json.Marshal(value.ExternalEndpoint); err == nil {
+				logrus.Infof("kafka-nodeport, get extenral endpoints: %s", string(res))
+			}
+		}
+
 		// 跳过manager节点
 		if strings.Contains(value.Name, "manager") {
 			continue
@@ -273,14 +334,27 @@ func (a *Addon) KafkaDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup
 		if index == 0 {
 			configMap[apistructs.AddonKafkaHostName] = value.Vip
 			configMap[apistructs.AddonKafkaPortName] = apistructs.KafakaDefaultPort
+			if externalEp := value.ExternalEndpoint; externalEp != nil {
+				configMap[apistructs.AddonKafkaExternalHostName] = externalEp.Hosts[0]
+				configMap[apistructs.AddonKafkaExternalPortName] = strconv.Itoa(int(externalEp.Ports[0]))
+				kafkaExternalHost = append(kafkaExternalHost, fmt.Sprintf("%s:%d", externalEp.Hosts[0], externalEp.Ports[0]))
+			}
+			index++
 			continue
 		}
-		configMap[apistructs.AddonKafkaHostName+"_"+strconv.Itoa(index-1)] = value.Vip
-		configMap[apistructs.AddonKafkaPortName+"_"+strconv.Itoa(index-1)] = apistructs.KafakaDefaultPort
+		configMap[apistructs.AddonKafkaHostName+strconv.Itoa(index-1)] = value.Vip
+		configMap[apistructs.AddonKafkaPortName+strconv.Itoa(index-1)] = apistructs.KafakaDefaultPort
+		if externalEp := value.ExternalEndpoint; externalEp != nil {
+			configMap[apistructs.AddonKafkaExternalHostName+strconv.Itoa(index)] = externalEp.Hosts[0]
+			configMap[apistructs.AddonKafkaExternalPortName+strconv.Itoa(index)] = strconv.Itoa(int(externalEp.Ports[0]))
+			kafkaExternalHost = append(kafkaExternalHost, fmt.Sprintf("%s:%d", externalEp.Hosts[0], externalEp.Ports[0]))
+		}
+		index++
 	}
 	configMap["MQ_SERVER_ADDRESS"] = strings.Join(kafkaHost, ",")
 	configMap["MQ_CLIENT_TYPE"] = strings.ToUpper(addonIns.AddonName)
 	configMap["KAFKA_HOSTS"] = strings.Join(kafkaHost, ",")
+	configMap["KAFKA_EXTERNAL_BOOTSTRAP_SERVERS"] = strings.Join(kafkaExternalHost, ",")
 	// manager暴露外网
 	configMap["PUBLIC_HOST"] = strings.Join([]string{addonIns.AddonName, "-", apistructs.AddonKafkaManager, "-", addonIns.ID, ".", (*clusterInfo)[apistructs.DICE_ROOT_DOMAIN]}, "")
 
@@ -300,6 +374,17 @@ func (a *Addon) RocketDeployStatus(addonIns *dbclient.AddonInstance, serviceGrou
 	for _, value := range serviceGroup.Services {
 		// nameSrv处理
 		if strings.Contains(value.Name, apistructs.AddonRocketNameSrvPrefix) {
+			if externalEp := value.ExternalEndpoint; externalEp != nil {
+				configMap[apistructs.AddonRocketNameSrvExternalPort] = strconv.Itoa(int(externalEp.Ports[0]))
+				for j, host := range value.ExternalEndpoint.Hosts {
+					hostName := apistructs.AddonRocketNameSrvExternalHost
+					if j != 0 {
+						hostName = fmt.Sprintf("%s%d", hostName, j+1)
+					}
+					configMap[hostName] = host
+				}
+			}
+
 			mqServerAddress = append(mqServerAddress, value.Vip+":"+apistructs.AddonRocketNameSrvDefaultPort)
 			if i == 1 {
 				configMap[apistructs.AddonRocketNameSrvHost] = value.Vip
@@ -311,8 +396,23 @@ func (a *Addon) RocketDeployStatus(addonIns *dbclient.AddonInstance, serviceGrou
 			configMap[apistructs.AddonRocketNameSrvPort+strconv.Itoa(i)] = apistructs.AddonRocketNameSrvDefaultPort
 			i++
 		}
-		// consul处理
-		if strings.Contains(value.Name, apistructs.AddonRocketConsulPrefix) {
+		if strings.Contains(value.Name, apistructs.AddonRocketBrokerPrefix) {
+			if externalEp := value.ExternalEndpoint; externalEp != nil {
+				for i, host := range value.ExternalEndpoint.Hosts {
+					hostName := apistructs.AddonRocketBrokerExternalHost
+					if i != 0 {
+						hostName = fmt.Sprintf("%s%d", hostName, i+1)
+					}
+					configMap[hostName] = host
+				}
+			}
+		}
+
+		// console
+		if strings.Contains(value.Name, apistructs.AddonRocketConslePrefix) {
+			if externalEp := value.ExternalEndpoint; externalEp != nil {
+				configMap[apistructs.AddonRocketConsoleExternalHost] = externalEp.Hosts[0]
+			}
 			configMap["PUBLIC_HOST"] = value.Vip + ":" + apistructs.AddonRocketConsoleDefaultPort
 		}
 	}
@@ -332,16 +432,43 @@ func (a *Addon) RabbitmqDeployStatus(addonIns *dbclient.AddonInstance, serviceGr
 	}
 	var mqServerAddress []string
 	for _, value := range serviceGroup.Services {
+		if value.ExternalEndpoint != nil {
+			if res, err := json.Marshal(value.ExternalEndpoint); err == nil {
+				logrus.Infof("rabbitmq-nodeport result: %v", string(res))
+			}
+		}
 		// 节点host处理
 		mqServerAddress = append(mqServerAddress, value.Vip+":"+apistructs.AddonRabbitmqDefaultPort)
 		if i == 1 {
 			configMap[apistructs.AddonRabbitmqHostName] = value.Vip
 			configMap[apistructs.AddonRabbitmqPortName] = apistructs.AddonRabbitmqDefaultPort
+			if externalEp := value.ExternalEndpoint; externalEp != nil {
+				configMap[apistructs.AddonRabbitmqExternalHostName] = externalEp.Hosts[0]
+				configMap[apistructs.AddonRabbitmqExternalPortName] = strconv.Itoa(int(externalEp.Ports[0]))
+				if len(externalEp.Ports) > 1 {
+					portList := make([]string, 0, len(externalEp.Ports[1:]))
+					for _, port := range externalEp.Ports[1:] {
+						portList = append(portList, strconv.Itoa(int(port)))
+					}
+					configMap[apistructs.AddonRabbitmqExternalOtherPortName] = strings.Join(portList, ",")
+				}
+			}
 			i++
 			continue
 		}
 		configMap[apistructs.AddonRabbitmqHostName+strconv.Itoa(i)] = value.Vip
 		configMap[apistructs.AddonRabbitmqPortName+strconv.Itoa(i)] = apistructs.AddonRabbitmqDefaultPort
+		if externalEp := value.ExternalEndpoint; externalEp != nil {
+			configMap[apistructs.AddonRabbitmqExternalHostName+strconv.Itoa(i)] = externalEp.Hosts[0]
+			configMap[apistructs.AddonRabbitmqExternalPortName+strconv.Itoa(i)] = strconv.Itoa(int(externalEp.Ports[0]))
+			if len(externalEp.Ports) > 1 {
+				portList := make([]string, 0, len(externalEp.Ports[1:]))
+				for _, port := range externalEp.Ports[1:] {
+					portList = append(portList, strconv.Itoa(int(port)))
+				}
+				configMap[apistructs.AddonRabbitmqExternalOtherPortName+strconv.Itoa(i)] = strings.Join(portList, ",")
+			}
+		}
 		i++
 	}
 	configMap["RABBIT_ADDRESS"] = strings.Join(mqServerAddress, ",")
@@ -363,20 +490,49 @@ func (a *Addon) RedisDeployStatus(addonIns *dbclient.AddonInstance, serviceGroup
 		configMap[apistructs.AddonRedisHostName] = serviceGroup.Services[0].Vip
 		configMap[apistructs.AddonRedisPortName] = apistructs.RedisDefaultPort
 		configMap[apistructs.AddonRedisPasswordName] = password.Value
+		if externalEp := serviceGroup.Services[0].ExternalEndpoint; externalEp != nil {
+			configMap[apistructs.AddonRedisExternalHostName] = externalEp.Hosts[0]
+			configMap[apistructs.AddonRedisExternalPortName] = strconv.Itoa(int(externalEp.Ports[0]))
+		}
 	} else {
 		serviceStr, _ := json.Marshal(serviceGroup.Services)
 		logrus.Info("redis sentinel 环境变量。" + string(serviceStr))
 		var sentinels []string
-		index := 1
 		for _, value := range serviceGroup.Services {
-			if strings.Index(value.Name, "sentinel") >= 0 {
-				index++
+			if strings.Contains(value.Name, "redis") && value.ExternalEndpoint != nil {
+				for i, host := range value.ExternalEndpoint.Hosts {
+					hostName := apistructs.AddonRedisMasterExternalHostName
+					if i != 0 {
+						hostName = fmt.Sprintf("%s%d", hostName, i+1)
+					}
+					configMap[hostName] = host
+				}
+				for _, port := range value.ExternalEndpoint.Ports {
+					if port != 0 {
+						configMap[apistructs.AddonRedisExternalPortName] = strconv.Itoa(int(port))
+					}
+				}
+			}
+			if strings.Contains(value.Name, "sentinel") {
 				sentinels = append(sentinels, value.Vip+":"+apistructs.RedisSentinelDefaultPort)
+				if value.ExternalEndpoint != nil {
+					configMap[apistructs.AddonRedisSentinelExternalPortName] = strconv.Itoa(int(value.ExternalEndpoint.Ports[0]))
+					for i, host := range value.ExternalEndpoint.Hosts {
+						hostName := apistructs.AddonRedisSentinelExternalHostName
+						if i != 0 {
+							hostName = fmt.Sprintf("%s%d", hostName, i+1)
+						}
+						configMap[hostName] = host
+					}
+				}
 			}
 		}
 		configMap[apistructs.AddonRedisSentinelsName] = strings.Join(sentinels, ",")
-		configMap[apistructs.AddonRedisPasswordName] = password.Value
+		if password.Value != apistructs.AddonRedisEmptyPassword {
+			configMap[apistructs.AddonRedisPasswordName] = password.Value
+		}
 		configMap[apistructs.AddonRedisMasterName] = apistructs.RedisDefaultMasterName
+		logrus.Infof("redis-nodport, %+v", serviceGroup.Services[0].ExternalEndpoint)
 	}
 	return configMap, nil
 }
@@ -390,10 +546,18 @@ func (a *Addon) ZookeeperDeployStatus(addonIns *dbclient.AddonInstance, serviceG
 		if index == 0 {
 			configMap[apistructs.AddonZKHostName] = value.Vip
 			configMap[apistructs.AddonZKPortName] = apistructs.AddonZKDefaultPort
+			if externalEp := value.ExternalEndpoint; externalEp != nil {
+				configMap[apistructs.AddonZKExternalHostName] = externalEp.Hosts[0]
+				configMap[apistructs.AddonZKExternalPortName] = strconv.Itoa(int(externalEp.Ports[0]))
+			}
 			continue
 		}
 		configMap[apistructs.AddonZKHostName+strconv.Itoa(index)] = value.Vip
 		configMap[apistructs.AddonZKPortName+strconv.Itoa(index)] = apistructs.AddonZKDefaultPort
+		if externalEp := value.ExternalEndpoint; externalEp != nil {
+			configMap[apistructs.AddonZKExternalHostName+strconv.Itoa(index)] = externalEp.Hosts[0]
+			configMap[apistructs.AddonZKExternalPortName] = strconv.Itoa(int(externalEp.Ports[0]))
+		}
 	}
 
 	configMap[apistructs.AddonZKHostListName] = strings.Join(zkHost, ",")
@@ -411,10 +575,18 @@ func (a *Addon) ApacheZookeeperDeployStatus(addonIns *dbclient.AddonInstance, se
 		if index == 0 {
 			configMap[apistructs.AddonZKHostName] = value.Vip
 			configMap[apistructs.AddonZKPortName] = apistructs.AddonZKDefaultPort
+			if externalEp := value.ExternalEndpoint; externalEp != nil {
+				configMap[apistructs.AddonZKExternalHostName] = externalEp.Hosts[0]
+				configMap[apistructs.AddonZKExternalPortName] = strconv.Itoa(int(externalEp.Ports[0]))
+			}
 			continue
 		}
 		configMap[apistructs.AddonZKHostName+strconv.Itoa(index)] = value.Vip
 		configMap[apistructs.AddonZKPortName+strconv.Itoa(index)] = apistructs.AddonZKDefaultPort
+		if externalEp := value.ExternalEndpoint; externalEp != nil {
+			configMap[apistructs.AddonZKExternalHostName+strconv.Itoa(index)] = externalEp.Hosts[index]
+			configMap[apistructs.AddonZKExternalPortName+strconv.Itoa(index)] = strconv.Itoa(int(externalEp.Ports[0]))
+		}
 	}
 
 	configMap[apistructs.AddonZKHostListName] = strings.Join(zkHost, ",")
@@ -784,7 +956,40 @@ func (a *Addon) BuildKafkaServiceItem(params *apistructs.AddonHandlerCreateItem,
 			"KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR": strconv.Itoa(kafkaFactor),
 			"KAFKA_DEFAULT_REPLICATION_FACTOR":       strconv.Itoa(kafkaFactor),
 			"KAFKA_HEAP_OPTS":                        strings.Join([]string{"-Xms", heapSize, "m -Xmx", heapSize, "m"}, ""),
+			// third party images kafka `start-kafka.sh` need
+			/*
+				KAFKA_LISTENER_SECURITY_PROTOCOL_MAP="KAFKA_LISTENER_SECURITY_PROTOCOL_MAP"
+				KAFKA_LISTENERS="KAFKA_LISTENERS"
+				KAFKA_INTER_BROKER_LISTENER_NAME="KAFKA_INTER_BROKER_LISTENER_NAME"
+				KAFKA_ADVERTISED_LISTENERS="KAFKA_ADVERTISED_LISTENERS"
+				EXTERNAL_ENABLED="N${HOST_NUM}_${EXTERNAL_ENABLED}"
+				if [ $IS_K8S ] && [ $IS_K8S = true ]; then
+				  eval export EXTERNAL_ENABLED="\$$EXTERNAL_ENABLED"
+				  if [ $EXTERNAL_ENABLED = true ]; then
+					 KAFKA_LISTENER_SECURITY_PROTOCOL_MAP="N${HOST_NUM}_${KAFKA_LISTENER_SECURITY_PROTOCOL_MAP}"
+					 KAFKA_LISTENERS="N${HOST_NUM}_${KAFKA_LISTENERS}"
+					 KAFKA_INTER_BROKER_LISTENER_NAME="N${HOST_NUM}_${KAFKA_INTER_BROKER_LISTENER_NAME}"
+					 KAFKA_ADVERTISED_LISTENERS="N${HOST_NUM}_${KAFKA_ADVERTISED_LISTENERS}"
+					 KAFKA_ADVERTISED_LISTENERS=${KAFKA_ADVERTISED_LISTENERS}",EXTERNAL://${HOST_IP}:${EXTERNAL_NODE_PORT}"
+				  fi
+				fi
+				eval export KAFKA_LISTENER_SECURITY_PROTOCOL_MAP="\$$KAFKA_LISTENER_SECURITY_PROTOCOL_MAP"
+				eval export KAFKA_LISTENERS="\$$KAFKA_LISTENERS"
+				eval export KAFKA_INTER_BROKER_LISTENER_NAME="\$$KAFKA_INTER_BROKER_LISTENER_NAME"
+				eval export KAFKA_ADVERTISED_LISTENERS="\$$KAFKA_ADVERTISED_LISTENERS"
+			*/
+			"EXTERNAL_ENABLED":                     "true",
+			"KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT",
+			"KAFKA_LISTENERS":                      "INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093",
+			"KAFKA_INTER_BROKER_LISTENER_NAME":     "INTERNAL",
 		}
+
+		serviceItem.Envs["KAFKA_ADVERTISED_LISTENERS"] = fmt.Sprintf(
+			"INTERNAL://%s:%s",
+			serviceItem.Envs["KAFKA_ADVERTISED_HOST_NAME"],
+			serviceItem.Envs["KAFKA_ADVERTISED_PORT"],
+		)
+
 		// volume信息
 		clusterType := (*clusterInfo)[apistructs.DICE_CLUSTER_TYPE]
 		switch strutil.ToLower(clusterType) {
@@ -1336,9 +1541,19 @@ func (a *Addon) BuildRedisServiceItem(params *apistructs.AddonHandlerCreateItem,
 	addonSpec *apistructs.AddonExtension, addonDice *diceyml.Object) error {
 	addonDeployPlan := addonSpec.Plan[params.Plan]
 	serviceMap := diceyml.Services{}
+
+	var password string
+	specifiedPass, ok := params.Options["password"]
+	if ok {
+		if specifiedPass == "" {
+			password = apistructs.AddonRedisEmptyPassword
+		} else {
+			password = specifiedPass
+		}
+	}
 	// 生成password
 	// 设置密码
-	password, err := a.savePassword(addonIns, apistructs.AddonRedisPasswordKey)
+	password, err := a.savePassword(addonIns, apistructs.AddonRedisPasswordKey, password)
 	if err != nil {
 		return err
 	}
@@ -1378,7 +1593,7 @@ func (a *Addon) BuildRedisServiceItem(params *apistructs.AddonHandlerCreateItem,
 		"REDIS_ADDR":                          "redis://localhost:6379",
 	}
 	masterServiceItem.SideCars[apistructs.RedisExporterNamePrefix] = &diceyml.SideCar{
-		Image: "registry.erda.cloud/retag/redis-exporter:v1.45.0",
+		Image: util.GetAddonPublicRegistry() + "/retag/redis-exporter:v1.45.0",
 		Envs:  exporterEnvs,
 	}
 	masterServiceItem.Ports = append(masterServiceItem.Ports, diceyml.ServicePort{
@@ -1448,11 +1663,22 @@ func (a *Addon) BuildRedisServiceItem(params *apistructs.AddonHandlerCreateItem,
 
 // buildRedisOperatorServiceItem redis operator build service item
 func (a *Addon) BuildRedisOperatorServiceItem(options map[string]string, addonIns *dbclient.AddonInstance, addonDice *diceyml.Object) error {
+	var password string
+	specifiedPass, ok := options["password"]
+	if ok {
+		if specifiedPass == "" {
+			password = apistructs.AddonRedisEmptyPassword
+		} else {
+			password = specifiedPass
+		}
+	}
+
 	// 设置密码
-	password, err := a.savePassword(addonIns, apistructs.AddonRedisPasswordKey)
+	password, err := a.savePassword(addonIns, apistructs.AddonRedisPasswordKey, password)
 	if err != nil {
 		return err
 	}
+
 	// 设置meta
 	addonDice.Meta = map[string]string{
 		"USE_OPERATOR": apistructs.AddonRedis,
@@ -1917,8 +2143,13 @@ func (a *Addon) DecryptPassword(kmskey *string, password string) (string, error)
 }
 
 // savePassword 保存密码
-func (a *Addon) savePassword(addonIns *dbclient.AddonInstance, key string) (string, error) {
-	password := random.String(16)
+func (a *Addon) savePassword(addonIns *dbclient.AddonInstance, key string, specifiedPassword ...string) (string, error) {
+	var password string
+	if len(specifiedPassword) > 0 && specifiedPassword[0] != "" {
+		password = specifiedPassword[0]
+	} else {
+		password = random.String(16)
+	}
 
 	// encrypt
 	encryptData, err := a.bdl.KMSEncrypt(apistructs.KMSEncryptRequest{

@@ -16,6 +16,7 @@ package executor
 
 import (
 	"context"
+	"runtime/debug"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -203,9 +204,10 @@ func updateOneExecutor(m *Manager, config *executorconfig.ExecutorConfig) error 
 	name := executortypes.Name(config.Name)
 	_, ok := m.executors[name]
 	logrus.Infof("updating executor: %s", config.Name)
-	if ok {
-		deleteOneExecutor(m, config)
+	if !ok {
+		return createOneExecutor(m, config)
 	}
+
 	return createOneExecutor(m, config)
 }
 
@@ -259,6 +261,17 @@ func (m *Manager) ListExecutors() []executortypes.Executor {
 
 func (m *Manager) PrintPoolUsage() {
 	for exc, pool := range m.pools {
+		if !pool.IsRunning() {
+			func() {
+				defer func() {
+					if err := recover(); err != nil {
+						debug.PrintStack()
+						logrus.Errorf("failed to start not running pool, err: %+v", err)
+					}
+				}()
+				go pool.Start()
+			}()
+		}
 		stat := pool.Statistics()
 		total := stat[1]
 		inuse := total - stat[0]

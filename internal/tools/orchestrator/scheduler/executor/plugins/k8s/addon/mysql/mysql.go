@@ -16,6 +16,7 @@ package mysql
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,13 +25,17 @@ import (
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/pointer"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon"
 	mysqlv1 "github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon/mysql/v1"
+	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/util"
 	"github.com/erda-project/erda/pkg/http/httpclient"
 	"github.com/erda-project/erda/pkg/parser/diceyml"
 	"github.com/erda-project/erda/pkg/schedule/schedulepolicy/constraintbuilders"
@@ -38,6 +43,7 @@ import (
 )
 
 type MysqlOperator struct {
+	cs     kubernetes.Interface
 	k8s    addon.K8SUtil
 	ns     addon.NamespaceUtil
 	secret addon.SecretUtil
@@ -61,13 +67,14 @@ func (my *MysqlOperator) NamespacedName(sg *apistructs.ServiceGroup) string {
 	return my.Namespace(sg) + "/" + my.Name(sg)
 }
 
-func New(k8s addon.K8SUtil, ns addon.NamespaceUtil, secret addon.SecretUtil, pvc addon.PVCUtil, client *httpclient.HTTPClient) *MysqlOperator {
+func New(cs kubernetes.Interface, k8s addon.K8SUtil, ns addon.NamespaceUtil, secret addon.SecretUtil, pvc addon.PVCUtil, client *httpclient.HTTPClient) *MysqlOperator {
 	return &MysqlOperator{
 		k8s:    k8s,
 		ns:     ns,
 		secret: secret,
 		pvc:    pvc,
 		client: client,
+		cs:     cs,
 	}
 }
 
@@ -168,6 +175,18 @@ func (my *MysqlOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 		}
 	}
 
+	envs := make([]corev1.EnvVar, 0, len(mysql.Env))
+	for k, val := range mysql.Env {
+		if strings.HasPrefix(k, "ADDON_") ||
+			strings.HasPrefix(k, "DICE_") ||
+			strings.HasPrefix(k, "SERVICE") {
+			envs = append(envs, corev1.EnvVar{
+				Name:  k,
+				Value: val,
+			})
+		}
+	}
+
 	obj := &mysqlv1.Mysql{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "database.erda.cloud/v1",
@@ -180,10 +199,13 @@ func (my *MysqlOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 		Spec: mysqlv1.MysqlSpec{
 			Version: v,
 
-			PrimaryMode: mysqlv1.ModeClassic,
-			Primaries:   1,
-			Replicas:    pointer.Int(replicas),
-
+			PrimaryMode:   mysqlv1.ModeClassic,
+			Primaries:     1,
+			Replicas:      pointer.Int(replicas),
+			Image:         mysql.Image,
+			ExporterImage: util.GetAddonPublicRegistry() + "/retag/mysqld-exporter:v0.14.0",
+			Env:           envs,
+			ServiceType:   corev1.ServiceTypeNodePort,
 			LocalUsername: "root",
 			LocalPassword: mysql.Env["MYSQL_ROOT_PASSWORD"],
 
@@ -274,6 +296,57 @@ func (my *MysqlOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servi
 
 	sg.Labels["PASSWORD"] = obj.Spec.LocalPassword
 
+	pods, err := my.cs.CoreV1().Pods(my.Namespace(sg)).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labels.FormatLabels(obj.Spec.Labels),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	logrus.Infof("list mysql pods, %d", len(pods.Items))
+
+	hosts := make([]string, 0, 2)
+	if len(pods.Items) != 0 {
+		for _, pod := range pods.Items {
+			if pod.Status.HostIP == "" {
+				return nil, fmt.Errorf("pod %s in schedule, none ip", pod.Name)
+			}
+			hosts = append(hosts, pod.Status.HostIP)
+		}
+
+		svcLabels := map[string]string{
+			"group": obj.Name,
+		}
+
+		svcList, err := my.cs.CoreV1().Services(obj.Namespace).List(context.Background(), metav1.ListOptions{
+			LabelSelector: labels.FormatLabels(svcLabels),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		nodePorts := make([]int32, 2)
+		for _, item := range svcList.Items {
+			if strings.Contains(item.Name, "write") {
+				nodePorts[0] = item.Spec.Ports[0].NodePort
+			}
+			if strings.Contains(item.Name, "read") {
+				nodePorts[1] = item.Spec.Ports[0].NodePort
+			}
+		}
+		logrus.Infof("get mysql %s node ports: %+v", obj.Name, nodePorts)
+
+		if len(nodePorts) != 0 {
+			sg.Services[0].ExternalEndpoint = &apistructs.ExternalEndpoint{
+				Hosts: hosts,
+				Ports: nodePorts,
+			}
+		}
+	}
+
+	marshaledSg, err := json.Marshal(sg)
+	logrus.Infof("mysql inspect service group json: %s", string(marshaledSg))
+
 	return sg, nil
 }
 
@@ -289,6 +362,24 @@ func (my *MysqlOperator) Remove(sg *apistructs.ServiceGroup) error {
 	if !resp.IsOK() {
 		return fmt.Errorf("failed to remove mysql, %s, statuscode: %d, body: %s",
 			my.NamespacedName(sg), resp.StatusCode(), b.String())
+	}
+
+	namespace := my.Namespace(sg)
+	name := my.Name(sg)
+	npName := fmt.Sprintf("%s-x-np", name)
+
+	_, err = my.cs.CoreV1().Services(namespace).Get(context.Background(), npName, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("failed to get service %s, err: %v", my.NamespacedName(sg), err)
+		}
+		return nil
+	}
+
+	err = my.cs.CoreV1().Services(my.Namespace(sg)).Delete(context.Background(), fmt.Sprintf("%s-x-np",
+		my.Name(sg)), metav1.DeleteOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to delete mysql %s node port service, %v", my.Name(sg), err)
 	}
 
 	//TODO remove pvc

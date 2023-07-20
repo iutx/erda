@@ -38,6 +38,7 @@ type RedisFailoverSpec struct {
 type RedisSettings struct {
 	Image              string                        `json:"image,omitempty"`
 	ImagePullPolicy    corev1.PullPolicy             `json:"imagePullPolicy,omitempty"`
+	Port               int32                         `json:"port,omitempty"`
 	Replicas           int32                         `json:"replicas,omitempty"`
 	Resources          corev1.ResourceRequirements   `json:"resources,omitempty"`
 	CustomConfig       []string                      `json:"customConfig,omitempty"`

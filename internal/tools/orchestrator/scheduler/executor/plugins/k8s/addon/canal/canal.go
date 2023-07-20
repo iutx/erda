@@ -16,6 +16,7 @@ package canal
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,8 +26,12 @@ import (
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon"
@@ -37,6 +42,7 @@ import (
 )
 
 type CanalOperator struct {
+	cs     kubernetes.Interface
 	k8s    addon.K8SUtil
 	ns     addon.NamespaceUtil
 	secret addon.SecretUtil
@@ -58,8 +64,9 @@ func (c *CanalOperator) NamespacedName(sg *apistructs.ServiceGroup) string {
 	return c.Namespace(sg) + "/" + c.Name(sg)
 }
 
-func New(k8s addon.K8SUtil, ns addon.NamespaceUtil, secret addon.SecretUtil, pvc addon.PVCUtil, client *httpclient.HTTPClient) *CanalOperator {
+func New(cs kubernetes.Interface, k8s addon.K8SUtil, ns addon.NamespaceUtil, secret addon.SecretUtil, pvc addon.PVCUtil, client *httpclient.HTTPClient) *CanalOperator {
 	return &CanalOperator{
+		cs:     cs,
 		k8s:    k8s,
 		ns:     ns,
 		secret: secret,
@@ -173,10 +180,9 @@ func (c *CanalOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 			Namespace: c.Namespace(sg),
 		},
 		Spec: canalv1.CanalSpec{
-			Version: v,
-
-			Replicas: canal.Scale,
-
+			Version:      v,
+			Image:        canal.Image,
+			Replicas:     canal.Scale,
 			Affinity:     &affinity,
 			Resources:    resources,
 			Labels:       make(map[string]string),
@@ -316,6 +322,41 @@ func (c *CanalOperator) Create(k8syml interface{}) error {
 			time.Sleep(5 * time.Second)
 		}
 	}
+
+	labels := map[string]string{
+		"addon": "canal",
+		"group": obj.Name,
+	}
+
+	// Create Service NodePort
+	npService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-x-np", obj.Name),
+			Namespace: obj.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Name:        "canal",
+					Protocol:    corev1.ProtocolTCP,
+					AppProtocol: nil,
+					Port:        11111,
+					TargetPort: intstr.IntOrString{
+						IntVal: 11111,
+					},
+				},
+			},
+			Type: corev1.ServiceTypeNodePort,
+		},
+	}
+
+	_, err := c.cs.CoreV1().Services(obj.Namespace).Create(context.Background(), npService, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create canal %s/%s node port service, %v", obj.Namespace, obj.Name, err)
+	}
+
 	return nil
 }
 
@@ -353,6 +394,90 @@ func (c *CanalOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servic
 		obj.Namespace,
 		"svc.cluster.local",
 	}, ".")
+
+	externalEp := &apistructs.ExternalEndpoint{
+		Hosts: make([]string, 0),
+		Ports: make([]int32, 0),
+	}
+
+	npSvc, err := c.cs.CoreV1().Services(obj.Namespace).Get(context.Background(),
+		fmt.Sprintf("%s-x-np", obj.Name), metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(npSvc.Spec.Ports) != 0 && npSvc.Spec.Ports[0].NodePort != 0 {
+		externalEp.Ports = append(externalEp.Ports, npSvc.Spec.Ports[0].NodePort)
+	}
+
+	pods, err := c.cs.CoreV1().Pods(obj.Namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labels.FormatLabels(map[string]string{
+			"group": obj.Name,
+			"addon": "canal",
+		}),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	logrus.Infof("canal-nodeport pod get %d", len(pods.Items))
+
+	for _, pod := range pods.Items {
+		if pod.Status.HostIP == "" {
+			return nil, fmt.Errorf("canal-nodeport pod %s/%s is not ready", pod.Namespace, pod.Name)
+		}
+		externalEp.Hosts = append(externalEp.Hosts, pod.Status.HostIP)
+		canalsvc.ExternalEndpoint = externalEp
+	}
+
+	if obj.Spec.Replicas > 1 {
+		options := obj.Spec.CanalOptions
+		_, zkServersOk := options["canal.zkServers"]
+		_, registerIpOk := options["canal.register.ip"]
+		port, _ := options["canal.port"]
+
+		if zkServersOk {
+			needUpdate := false
+			if !registerIpOk {
+				needUpdate = true
+				options["canal.register.ip"] = canalsvc.ExternalEndpoint.Hosts[0]
+			}
+			if canalsvc.ExternalEndpoint.Ports[0] != 0 && port != strconv.Itoa(int(canalsvc.ExternalEndpoint.Ports[0])) {
+				needUpdate = true
+				nodePort := canalsvc.ExternalEndpoint.Ports[0]
+				options["canal.port"] = strconv.Itoa(int(nodePort))
+				if npSvc.Spec.Ports[0].Port != nodePort {
+					npSvc.Spec.Ports[0].Port = nodePort
+					npSvc.Spec.Ports[0].TargetPort = intstr.IntOrString{
+						IntVal: nodePort,
+					}
+					npSvc.ResourceVersion = ""
+					_, err := c.cs.CoreV1().Services(obj.Namespace).Update(context.Background(), npSvc, metav1.UpdateOptions{})
+					if err != nil {
+						return nil, fmt.Errorf("canal-nodeport failed to update custom node port, %d, err: %v", nodePort, err)
+					}
+				}
+
+			}
+			if needUpdate {
+				obj.Spec.CanalOptions = options
+				var b bytes.Buffer
+				res, err := c.client.Put(c.k8s.GetK8SAddr()).
+					Path(fmt.Sprintf("/apis/database.erda.cloud/v1/namespaces/%s/canals/%s", obj.Namespace, obj.Name)).
+					JSONBody(obj).
+					Do().
+					Body(&b)
+				if err != nil {
+					return nil, fmt.Errorf("failed to update canal, %s/%s, err: %s, body: %s",
+						obj.Namespace, obj.Name, err.Error(), b.String())
+				}
+				if !res.IsOK() {
+					return nil, fmt.Errorf("failed to update canal, %s/%s, statuscode: %d, body: %s",
+						obj.Namespace, obj.Name, res.StatusCode(), b.String())
+				}
+			}
+		}
+	}
 
 	//TODO: check canal cm destination
 	time.Sleep(5 * time.Second)
@@ -426,6 +551,25 @@ func (c *CanalOperator) Remove(sg *apistructs.ServiceGroup) error {
 		return fmt.Errorf("failed to remove canal, %s, statuscode: %d, body: %s",
 			c.NamespacedName(sg), res.StatusCode(), b.String())
 	}
+
+	namespace := c.Namespace(sg)
+	name := c.Name(sg)
+	npName := fmt.Sprintf("%s-x-np", name)
+
+	_, err = c.cs.CoreV1().Services(namespace).Get(context.Background(), npName, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("failed to get service %s, err: %v", c.NamespacedName(sg), err)
+		}
+		return nil
+	}
+
+	err = c.cs.CoreV1().Services(namespace).Delete(context.Background(), fmt.Sprintf("%s-x-np", name),
+		metav1.DeleteOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to delete mysql %s node port service, %v", c.Name(sg), err)
+	}
+
 	return nil
 }
 

@@ -16,24 +16,36 @@ package redis
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/erda-project/erda/apistructs"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/addon"
 	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/plugins/k8s/k8sapi"
+	"github.com/erda-project/erda/internal/tools/orchestrator/scheduler/executor/util"
 	"github.com/erda-project/erda/pkg/http/httpclient"
 	"github.com/erda-project/erda/pkg/schedule/schedulepolicy/constraintbuilders"
 	"github.com/erda-project/erda/pkg/schedule/schedulepolicy/constraintbuilders/constraints"
 	"github.com/erda-project/erda/pkg/strutil"
 )
 
+var (
+	redisExporterImage = util.GetAddonPublicRegistry() + "/retag/redis-exporter:v1.45.0"
+)
+
 type RedisOperator struct {
+	cs          kubernetes.Interface
 	k8s         addon.K8SUtil
 	deployment  addon.DeploymentUtil
 	statefulset addon.StatefulsetUtil
@@ -44,7 +56,9 @@ type RedisOperator struct {
 	client      *httpclient.HTTPClient
 }
 
-func NewRedisOperator(k8sutil addon.K8SUtil,
+func NewRedisOperator(
+	cs kubernetes.Interface,
+	k8sutil addon.K8SUtil,
 	deploy addon.DeploymentUtil,
 	sts addon.StatefulsetUtil,
 	service addon.ServiceUtil,
@@ -61,6 +75,7 @@ func NewRedisOperator(k8sutil addon.K8SUtil,
 		overcommit:  overcommit,
 		secret:      secret,
 		client:      client,
+		cs:          cs,
 	}
 }
 
@@ -155,6 +170,18 @@ func (ro *RedisOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 	addon.SetAddonLabelsAndAnnotations(svc0, labels, annotations)
 	addon.SetAddonLabelsAndAnnotations(svc1, labels, annotations)
 
+	password := redisService.Env["requirepass"]
+	if password == apistructs.AddonRedisEmptyPassword {
+		password = ""
+	}
+
+	if addonId, ok := redisService.Env["ADDON_ID"]; ok {
+		labels["ADDON_ID"] = addonId
+	}
+	if clusterName, ok := redisService.Env["DICE_CLUSTER_NAME"]; ok {
+		labels["DICE_CLUSTER_NAME"] = clusterName
+	}
+
 	rf := RedisFailover{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "databases.spotahome.com/v1",
@@ -178,7 +205,7 @@ func (ro *RedisOperator) Convert(sg *apistructs.ServiceGroup) interface{} {
 			Namespace: genK8SNamespace(sg.Type, sg.ID),
 		},
 		Data: map[string][]byte{
-			"password": []byte(redisService.Env["requirepass"]),
+			"password": []byte(password),
 		},
 	}
 	return redisFailoverAndSecret{RedisFailover: rf, Secret: secret}
@@ -190,13 +217,88 @@ func (ro *RedisOperator) Create(k8syml interface{}) error {
 	if !ok {
 		return fmt.Errorf("[BUG] this k8syml should be redisFailoverAndSecret")
 	}
+
 	redis := redisAndSecret.RedisFailover
 	secret := redisAndSecret.Secret
+
+	labels := map[string]string{
+		"app.kubernetes.io/name": redis.Name,
+	}
+	portName := "fake-port"
+
+	// Create Service NodePort
+	rfrFakeNodePort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("rfr-%s-np", redis.Name),
+			Namespace: redis.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:     portName,
+					Protocol: corev1.ProtocolTCP,
+					Port:     6379,
+					TargetPort: intstr.IntOrString{
+						IntVal: 6379,
+					},
+				},
+			},
+			Selector: labels,
+			Type:     corev1.ServiceTypeNodePort,
+		},
+	}
+
+	// Create Service NodePort
+	rfsFakeNodePort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("rfs-%s-np", redis.Name),
+			Namespace: redis.Namespace,
+			Labels: map[string]string{
+				apistructs.ServiceTypeLabel: apistructs.ServiceTypeNodePort,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:     portName,
+					Protocol: corev1.ProtocolTCP,
+					Port:     26379,
+					TargetPort: intstr.IntOrString{
+						IntVal: 26379,
+					},
+				},
+			},
+			Selector: labels,
+			Type:     corev1.ServiceTypeNodePort,
+		},
+	}
+
 	if err := ro.ns.Exists(redis.Namespace); err != nil {
 		if err := ro.ns.Create(redis.Namespace, nil); err != nil {
 			return err
 		}
 	}
+
+	rfrNewService, err := ro.cs.CoreV1().Services(redis.Namespace).Create(context.Background(), rfrFakeNodePort, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create redis fake %s node port service, %v", redis.Name, err)
+	}
+	_, err = ro.cs.CoreV1().Services(redis.Namespace).Create(context.Background(), rfsFakeNodePort, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create redis fake sentinal %s node port service, %v", redis.Name, err)
+	}
+
+	defer func() {
+		if err := ro.cs.CoreV1().Services(redis.Namespace).Delete(context.Background(), rfrNewService.Name,
+			metav1.DeleteOptions{}); err != nil {
+			logrus.Errorf("failed to delete redis fake port %s/%s node port service", redis.Namespace, rfrNewService.Name)
+		}
+	}()
+
+	redis.Spec.Redis.HostNetwork = true
+	redis.Spec.Redis.Port = rfrNewService.Spec.Ports[0].NodePort
+
 	if err := ro.secret.CreateIfNotExist(&secret); err != nil {
 		return err
 	}
@@ -217,18 +319,76 @@ func (ro *RedisOperator) Create(k8syml interface{}) error {
 }
 
 func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.ServiceGroup, error) {
-	deploylist, err := ro.deployment.List(genK8SNamespace(sg.Type, sg.ID), nil)
+	namespace := genK8SNamespace(sg.Type, sg.ID)
+	deploylist, err := ro.deployment.List(namespace, nil)
 	if err != nil {
 		return nil, err
 	}
-	stslist, err := ro.statefulset.List(genK8SNamespace(sg.Type, sg.ID))
+	stslist, err := ro.statefulset.List(namespace)
 	if err != nil {
 		return nil, err
 	}
-	svclist, err := ro.service.List(genK8SNamespace(sg.Type, sg.ID), nil)
+	svclist, err := ro.service.List(namespace, nil)
 	if err != nil {
 		return nil, err
 	}
+
+	// TODO: get redis info dynamically
+	// current 2 redis + 3 sentinel
+	externalSentinelEps := &apistructs.ExternalEndpoint{
+		Hosts: make([]string, 0, 3),
+		Ports: make([]int32, 1),
+	}
+
+	externalRedisEps := &apistructs.ExternalEndpoint{
+		Hosts: make([]string, 0, 2),
+		Ports: make([]int32, 1),
+	}
+
+	for _, svc := range svclist.Items {
+		if strings.Contains(svc.Name, "np") && svc.Spec.Ports[0].NodePort != 0 {
+			externalSentinelEps.Ports[0] = svc.Spec.Ports[0].NodePort
+		}
+	}
+
+	pods, err := ro.cs.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		logrus.Errorf("failed to list namespace %s, pods: %v", namespace, err)
+		return nil, err
+	}
+
+	for _, item := range pods.Items {
+		if item.Spec.NodeName == "" {
+			continue
+		}
+
+		node, err := ro.cs.CoreV1().Nodes().Get(context.Background(), item.Spec.NodeName, metav1.GetOptions{})
+		if err != nil {
+			logrus.Errorf("redis-nodeport, failed to get node %s, err: %v", item.Spec.NodeName, err)
+			return nil, err
+		}
+		nodeIP := ""
+		for _, addr := range node.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP {
+				nodeIP = addr.Address
+			}
+		}
+		if nodeIP == "" {
+			return nil, fmt.Errorf("node %s can't get internal ip", node.Name)
+		}
+
+		val, ok := item.Labels["app.kubernetes.io/component"]
+		if !ok {
+			continue
+		}
+		switch val {
+		case "redis":
+			externalRedisEps.Hosts = append(externalRedisEps.Hosts, nodeIP)
+		case "sentinel":
+			externalSentinelEps.Hosts = append(externalSentinelEps.Hosts, nodeIP)
+		}
+	}
+
 	var redis, sentinel *apistructs.Service
 	if sg.Services[0].Name == svcNameRedis {
 		redis = &(sg.Services[0])
@@ -261,6 +421,15 @@ func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servi
 		} else {
 			redis.Status = apistructs.StatusUnHealthy
 		}
+
+		for _, envVar := range sts.Spec.Template.Spec.Containers[0].Env {
+			if envVar.Name == "REDIS_PORT" {
+				redisPort, err := strconv.Atoi(envVar.Value)
+				if err == nil {
+					externalRedisEps.Ports = append(externalRedisEps.Ports, int32(redisPort))
+				}
+			}
+		}
 	}
 
 	for _, svc := range svclist.Items {
@@ -271,6 +440,9 @@ func (ro *RedisOperator) Inspect(sg *apistructs.ServiceGroup) (*apistructs.Servi
 	} else {
 		sg.Status = apistructs.StatusUnHealthy
 	}
+
+	redis.ExternalEndpoint = externalRedisEps
+	sentinel.ExternalEndpoint = externalSentinelEps
 	return sg, nil
 }
 
@@ -297,6 +469,22 @@ func (ro *RedisOperator) Remove(sg *apistructs.ServiceGroup) error {
 		logrus.Errorf("failed to delete namespace: %s: %v", k8snamespace, err)
 		return nil
 	}
+
+	npName := fmt.Sprintf("rfs-%s-np", sg.ID)
+
+	_, err = ro.cs.CoreV1().Services(k8snamespace).Get(context.Background(), npName, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("failed to get service %s/%s, err: %v", k8snamespace, npName, err)
+		}
+		return nil
+	}
+
+	err = ro.cs.CoreV1().Services(k8snamespace).Delete(context.Background(), npName, metav1.DeleteOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to delete redis sentinel %s node port service, %v", npName, err)
+	}
+
 	return nil
 }
 
@@ -387,10 +575,12 @@ func (ro *RedisOperator) convertRedis(svc apistructs.Service, affinity *corev1.A
 				fmt.Sprintf("%dMi", int(svc.Resources.Mem))),
 		},
 	}
-	settings.Image = svc.Image
-	settings.CustomConfig = []string{
-		"ignore-warnings ARM64-COW-BUG",
+	settings.Exporter = RedisExporter{
+		Enabled: true,
+		Image:   redisExporterImage,
 	}
+	settings.Image = svc.Image
+	settings.CustomConfig = []string{}
 	return settings
 }
 
@@ -413,12 +603,20 @@ func convertSentinel(svc apistructs.Service, affinity *corev1.Affinity) Sentinel
 				fmt.Sprintf("%dMi", int(svc.Resources.Mem))),
 		},
 	}
-	settings.CustomConfig = []string{
-		fmt.Sprintf("auth-pass %s", svc.Env["requirepass"]),
+
+	configs := []string{
 		"down-after-milliseconds 12000",
 		"failover-timeout 12000",
-		"ignore-warnings ARM64-COW-BUG",
 	}
+
+	password := svc.Env["requirepass"]
+	if password == apistructs.AddonRedisEmptyPassword {
+		password = ""
+	} else {
+		configs = append(configs, fmt.Sprintf("auth-pass %s", password))
+	}
+
+	settings.CustomConfig = configs
 	settings.Image = svc.Image
 	return settings
 }
