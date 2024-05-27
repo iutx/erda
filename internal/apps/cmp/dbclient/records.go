@@ -83,11 +83,11 @@ func (r *recordsReader) ByUserIDs(userids ...string) *recordsReader {
 }
 
 func (r *recordsReader) ByCreateTime(beforeNSecs int) *recordsReader {
-	return r.updateDBEngine(r.db.Where("created_at > now() - interval %d second", beforeNSecs))
+	return r.updateDBEngine(r.db.Where("created_at > now() - interval ? second", beforeNSecs))
 }
 
 func (r *recordsReader) ByUpdateTime(beforeNSecs int) *recordsReader {
-	return r.updateDBEngine(r.db.Where("updated_at > now() - interval %d second", beforeNSecs))
+	return r.updateDBEngine(r.db.Where("updated_at > now() - interval ? second", beforeNSecs))
 }
 
 func (r *recordsReader) Limit(n int) *recordsReader {
@@ -109,7 +109,7 @@ func (r *recordsReader) Do() ([]Record, error) {
 	if r.offset != -1 {
 		expr = expr.Offset(r.offset)
 	}
-	if err := expr.Find(&records).Error; err != nil {
+	if err := expr.Debug().Find(&records).Error; err != nil {
 		return nil, err
 	}
 	return records, nil
