@@ -176,7 +176,7 @@ func init() {
 		lstore := &sync.Map{}
 		stopCh := make(chan struct{}, 1)
 		edas.registerEventChanAndLocalStore(evCh, stopCh, lstore)
-		go edas.WaitEvent(lstore, stopCh)
+		//go edas.WaitEvent(lstore, stopCh)
 		return edas, nil
 	})
 }
@@ -628,6 +628,18 @@ func (e *EDAS) updateService(ctx context.Context, runtime *apistructs.ServiceGro
 			return err
 		}
 	} else {
+		//查询最新一次的发布单，如果存在运行中则终止
+		orderList, err := e.listRecentChangeOrderInfo(appID)
+		if err != nil {
+			logrus.Errorf("[EDAS] listRecentChangeOrderInfo, appName: %s, error: %v", appName, err)
+		} else {
+			if len(orderList.ChangeOrder) > 0 && orderList.ChangeOrder[0].Status == 1 {
+				if err := e.abortChangeOrder(orderList.ChangeOrder[0].ChangeOrderId); err != nil {
+					logrus.Errorf("[EDAS] abortChangeOrder, appName: %s, error: %v", appName, err)
+				}
+			}
+		}
+
 		svcSpec, err := e.fillServiceSpec(s, runtime, true)
 		if err != nil {
 			return errors.Wrap(err, "fill service spec")
