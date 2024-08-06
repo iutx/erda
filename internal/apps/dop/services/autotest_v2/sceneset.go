@@ -274,8 +274,13 @@ func (svc *Service) ExecuteAutotestSceneSet(req apistructs.AutotestExecuteSceneS
 		reqPipeline.ClusterName = testClusterName
 	}
 
-	pipelineDTO, err := svc.pipelineSvc.PipelineCreateV2(apis.WithInternalClientContext(context.Background(), discover.DOP()), &reqPipeline)
+	pipelineDTO, err := svc.pipelineSvc.PipelineCreateV2(
+		apis.WithInternalClientContext(
+			context.Background(), discover.DOP(),
+		), &reqPipeline,
+	)
 	if err != nil {
+		fmt.Println("------------>", err)
 		return nil, err
 	}
 
