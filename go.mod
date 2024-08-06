@@ -476,7 +476,7 @@ replace (
 	github.com/containerd/containerd => github.com/containerd/containerd v1.4.4
 	github.com/coreos/bbolt => go.etcd.io/bbolt v1.3.5
 	github.com/docker/spdystream => github.com/docker/spdystream v0.0.0-20160310174837-449fdfce4d96
-	github.com/erda-project/erda-infra => github.com/erda-project/erda-infra v0.0.0-20230711160226-c6156f3b1be1
+	github.com/erda-project/erda-infra => github.com/iutx/erda-infra v0.0.0-20240806025736-babcb910e5fe
 	github.com/erda-project/erda-proto-go v1.4.0 => ./api/proto-go
 	github.com/getkin/kin-openapi => github.com/getkin/kin-openapi v0.49.0
 	github.com/go-logr/logr => github.com/go-logr/logr v0.4.0
