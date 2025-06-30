@@ -492,6 +492,7 @@ replace (
 	erda.cloud/rocketmq => github.com/erda-project/rocketmq-operator v0.0.0-20221222075906-f28c42d7bf23
 	github.com/containerd/containerd => github.com/containerd/containerd v1.4.4
 	github.com/docker/spdystream => github.com/docker/spdystream v0.0.0-20160310174837-449fdfce4d96
+	github.com/erda-project/erda-infra => github.com/iutx/erda-infra v0.0.0-20250630031849-4029b3beed8f
 	github.com/erda-project/erda-proto-go v1.4.0 => ./api/proto-go
 	github.com/getkin/kin-openapi => github.com/getkin/kin-openapi v0.49.0
 	github.com/google/gnostic => github.com/googleapis/gnostic v0.4.0

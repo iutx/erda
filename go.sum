@@ -1249,8 +1249,6 @@ github.com/envoyproxy/protoc-gen-validate v1.0.4 h1:gVPz/FMfvh57HdSJQyvBtF00j8JU
 github.com/envoyproxy/protoc-gen-validate v1.0.4/go.mod h1:qys6tmnRsYrQqIhm2bvKZH4Blx/1gTIZ2UKVY1M+Yew=
 github.com/erda-project/elastic v0.0.1-ex h1:5ajfxQ5S5YjpzFqY9LzL9hiKWCn6q/JDT4n8sNv7+pU=
 github.com/erda-project/elastic v0.0.1-ex/go.mod h1:iAVsas6fcmt9pxtge1+dErMhecv+RLSXlD4rnZRJVW0=
-github.com/erda-project/erda-infra v1.0.10-0.20240731020040-45091257939a h1:8m6MT2DCVgBupDQFTsSzjwbOmT9k1CdF61c/+acHRvA=
-github.com/erda-project/erda-infra v1.0.10-0.20240731020040-45091257939a/go.mod h1:R0y4IDOlt+Lw4MLjQmTVZermz/4ExuHrFONo+9ud4Jo=
 github.com/erda-project/erda-infra/tools v0.0.0-20240613021434-6a57addb81b3 h1:PP/xS8+3kOWoTgtPrgweMWLYg28fMrLY1ymqd+EFwO8=
 github.com/erda-project/erda-infra/tools v0.0.0-20240613021434-6a57addb81b3/go.mod h1:pBTZ26w6QAOc6IHSY48Q8SeIghu3knfCZXa1Xgd1FJM=
 github.com/erda-project/erda-oap-thirdparty-protocol v0.0.0-20210907135609-15886a136d5b h1:GWf2ChasZFerFwQoTokIvjJLWH57ligTSLD2hUb7UWk=
@@ -1804,6 +1802,8 @@ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d/go.mod h1:qj24IKcXYK6Iy9ceXlo3Tc+vtHo9lIhSX5JddghvEPo=
 github.com/invopop/jsonschema v0.4.0/go.mod h1:O9uiLokuu0+MGFlyiaqtWxwqJm41/+8Nj0lD7A36YH0=
+github.com/iutx/erda-infra v0.0.0-20250630031849-4029b3beed8f h1:sVJIzMe4iZNKiOqnMb6hIlu0SMea9PAqamBVDlIPQhk=
+github.com/iutx/erda-infra v0.0.0-20250630031849-4029b3beed8f/go.mod h1:R0y4IDOlt+Lw4MLjQmTVZermz/4ExuHrFONo+9ud4Jo=
 github.com/jackc/pgx v3.6.2+incompatible h1:2zP5OD7kiyR3xzRYMhOcXVvkDZsImVXfj+yIyTQf3/o=
 github.com/jackc/pgx v3.6.2+incompatible/go.mod h1:0ZGrqGqkRlliWnWB4zKnWtjbSWbGkVEFm4TeybAXq+I=
 github.com/jcchavezs/porto v0.1.0 h1:Xmxxn25zQMmgE7/yHYmh19KcItG81hIwfbEEFnd6w/Q=

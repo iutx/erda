@@ -36,12 +36,12 @@ func (p *provider) SetEntities(ctx context.Context, list []*entity.Entity) (int,
 	}
 	bulk := p.es.Client().Bulk()
 	for _, data := range list {
-		index, id, typ, upsertDoc, updateDoc, err := p.prepareSetRequest(ctx, data)
+		index, id, _, upsertDoc, updateDoc, err := p.prepareSetRequest(ctx, data)
 		if err != nil {
 			return 0, err
 		}
 		req := elastic.NewBulkUpdateRequest().
-			Index(index).Type(typ).Id(id).Doc(updateDoc).Upsert(upsertDoc)
+			Index(index).Id(id).Doc(updateDoc).Upsert(upsertDoc)
 		bulk.Add(req)
 	}
 	res, err := bulk.Timeout(p.writeTimeoutMS).Do(context.Background())

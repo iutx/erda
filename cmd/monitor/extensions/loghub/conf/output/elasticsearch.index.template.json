@@ -14,48 +14,46 @@
         }
     },
     "mappings":{
-        "logs":{
-            "dynamic_templates":[
-                {
-                    "message_field":{
-                        "path_match":"message",
-                        "match_mapping_type":"string",
-                        "mapping":{
-                            "type":"text",
-                            "norms":false
-                        }
-                    }
-                },
-                {
-                    "content_field":{
-                        "path_match":"content",
-                        "match_mapping_type":"string",
-                        "mapping":{
-                            "type":"text",
-                            "norms":false
-                        }
-                    }
-                },
-                {
-                    "tags": {
-                        "match": "*",
-                        "match_mapping_type": "string",
-                        "mapping": {
-                            "type": "keyword",
-                            "ignore_above": 10240
-                        }
-                    }
-                }
-            ],
-            "properties":{
-                "@timestamp":{
-                    "type":"date"
-                },
-                "@version":{
-                    "type":"keyword"
-                }
-            }
-        }
+      "dynamic_templates":[
+          {
+              "message_field":{
+                  "path_match":"message",
+                  "match_mapping_type":"string",
+                  "mapping":{
+                      "type":"text",
+                      "norms":false
+                  }
+              }
+          },
+          {
+              "content_field":{
+                  "path_match":"content",
+                  "match_mapping_type":"string",
+                  "mapping":{
+                      "type":"text",
+                      "norms":false
+                  }
+              }
+          },
+          {
+              "tags": {
+                  "match": "*",
+                  "match_mapping_type": "string",
+                  "mapping": {
+                      "type": "keyword",
+                      "ignore_above": 10240
+                  }
+              }
+          }
+      ],
+      "properties":{
+          "@timestamp":{
+              "type":"date"
+          },
+          "@version":{
+              "type":"keyword"
+          }
+      }
     },
     "aliases":{}
 }
