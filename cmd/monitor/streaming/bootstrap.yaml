@@ -16,8 +16,6 @@ kafkago:
   client_id: streaming
   debug_client: ${KAFKAGO_DEBUG_CLIENT:true}
 
-profile-agent:
-
 
 #kafka.topic.initializer:
 #  force: ${KAFKA_INIT_FORCE_SUCCESS:true}
@@ -451,7 +449,7 @@ browser-analytics:
     topic: "${METRIC_TOPICS:spot-metrics}"
     parallelism: ${KAFKA_PARALLELISM:3}
     batch:
-      size:  ${KAFKA_BATCH_SIZE:50}
+      size: ${KAFKA_BATCH_SIZE:50}
       timeout: "10s"
   ipdb: "conf/ipdata.dat"
 
@@ -486,7 +484,7 @@ trace-storage:
       topic: "${SPOT_TRACE_TOPICS:spot-trace}"
       parallelism: ${KAFKA_PARALLELISM:3}
       batch:
-        size:  ${KAFKA_BATCH_SIZE:50}
+        size: ${KAFKA_BATCH_SIZE:50}
         timeout: "10s"
 
 # entity
@@ -645,7 +643,7 @@ erda.oap.collector.processor.modifier@span:
     - action: drop
       key: tags.http_wrote_bytes
 
-erda.oap.collector.processor.profile: {}
+erda.oap.collector.processor.profile: { }
 
 erda.oap.collector.exporter.clickhouse@span:
   _enable: ${WRITE_SPAN_TO_CLICKHOUSE_ENABLE:true}
