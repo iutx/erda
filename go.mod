@@ -500,6 +500,8 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 )
 
+require github.com/panjf2000/ants/v2 v2.11.3
+
 replace (
 	erda.cloud/rocketmq => github.com/erda-project/rocketmq-operator v0.0.0-20221222075906-f28c42d7bf23
 	github.com/containerd/containerd => github.com/containerd/containerd v1.4.4

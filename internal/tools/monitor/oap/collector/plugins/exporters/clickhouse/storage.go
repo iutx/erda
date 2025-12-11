@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/panjf2000/ants"
+	"github.com/panjf2000/ants/v2"
 	"github.com/spf13/cast"
 
 	"github.com/erda-project/erda-infra/base/logs"
@@ -58,7 +58,7 @@ func (st *Storage) Start(ctx context.Context) error {
 	st.ctx = ctx
 	st.cancel = cancel
 
-	st.logger.Infof("ants new pool, %d", st.cfg.CurrencyNum)
+	st.logger.Infof("ants new pool %d", st.cfg.CurrencyNum)
 	pool, err := ants.NewPool(st.cfg.CurrencyNum, ants.WithPreAlloc(true))
 	if err != nil {
 		return err
@@ -118,13 +118,10 @@ func (st *Storage) handleBatch() {
 }
 
 func (st *Storage) dispatchSend(b driver.Batch) {
-	if err := st.sendPool.Submit(func() {
+	go func() {
 		st.logger.Info("submitted batch job")
 		st.sendBatch(b)
-	}); err != nil {
-		st.logger.Errorf("ck_send_trace submit_error err=%s", err)
-		st.abortBatch(b)
-	}
+	}()
 }
 
 func (st *Storage) sendBatch(b driver.Batch) {
